@@ -7,7 +7,7 @@ easy modification of agent behavior.
 """
 
 # Configuration constants
-TERRAFORM_DIR = "/home/dotuanminh/AI-backend/terraform"
+TERRAFORM_DIR = "/home/ubuntu/IaC-drift-multi-agents/terraform"
 
 class AgentPrompts:
     """Container for all agent system prompts"""

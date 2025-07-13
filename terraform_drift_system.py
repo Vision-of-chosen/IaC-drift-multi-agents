@@ -42,7 +42,7 @@ sys.path.append("tools/src")
 from chat_interface import TerraformDriftChatInterface
 
 # Configuration
-TERRAFORM_DIR = "/home/dotuanminh/AI-backend/terraform"
+TERRAFORM_DIR = "/home/ubuntu/IaC-drift-multi-agents/terraform"
 
 
 def main():

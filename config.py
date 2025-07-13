@@ -11,7 +11,7 @@ BEDROCK_MODEL_ID = "apac.anthropic.claude-3-5-sonnet-20240620-v1:0"
 BEDROCK_REGION = "ap-southeast-2"
 
 # Terraform Configuration
-TERRAFORM_DIR = "/home/dotuanminh/AI-backend/terraform"
+TERRAFORM_DIR = "/home/ubuntu/IaC-drift-multi-agents/terraform"
 
 # System Configuration
 LOGGING_LEVEL = "INFO"
