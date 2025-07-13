@@ -387,6 +387,3 @@ $RECYCLE.BIN/
 Icon
 ._*
 
-# Custom project files
-shared_memory.py
-setup.sh
