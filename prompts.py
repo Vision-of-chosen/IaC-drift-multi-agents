@@ -7,7 +7,7 @@ easy modification of agent behavior.
 """
 
 # Configuration constants
-TERRAFORM_DIR = "/home/dotuanminh/AI-backend/terraform"
+TERRAFORM_DIR = "./terraform"  # Using a relative path that works cross-platform
 
 class AgentPrompts:
     """Container for all agent system prompts"""
@@ -61,10 +61,13 @@ TECHNICAL CAPABILITIES:
 
 TOOLS AVAILABLE:
 - use_aws: Query actual AWS infrastructure state
+- read_tfstate: Read and parse Terraform state files into a structured Python dictionary
+- cloudtrail_logs: Fetch and analyze AWS CloudTrail logs for infrastructure changes
+- cloudwatch_logs: Fetch and analyze AWS CloudWatch logs for infrastructure events
 
 WORKFLOW:
-1. Read Terraform state files from {TERRAFORM_DIR}
-2. Extract resource configurations from state
+1. Read Terraform state files from {TERRAFORM_DIR} using the read_tfstate tool
+2. Extract resource configurations from the parsed state
 3. Query corresponding AWS resources using use_aws tool
 4. Compare state vs actual configurations
 5. Document all drift findings
@@ -111,6 +114,9 @@ SEVERITY LEVELS:
 
 TOOLS AVAILABLE:
 - use_aws: Deep analysis of AWS resource configurations
+- aws_documentation_search: Search AWS documentation for services, resources and best practices
+- terraform_documentation_search: Search Terraform documentation for providers and resources
+- retrieve: Access Bedrock Knowledge Base for additional information
 
 WORKFLOW:
 1. Read drift detection results from shared memory
@@ -151,9 +157,13 @@ SAFETY PROTOCOLS:
 - Validate changes after application
 
 TOOLS AVAILABLE:
+- terraform_run_command: Execute Terraform commands through local MCP server
+- terraform_run_checkov_scan: Run security and compliance scans on Terraform code
+- terraform_get_best_practices: Retrieve AWS Terraform best practices guidance
+- terraform_get_provider_docs: Get documentation for AWS resources and configurations
 - file_write: Create corrected Terraform configurations
 - editor: Modify existing Terraform files
-- use_aws: Execute Terraform operations and validate changes
+- use_aws: Execute AWS operations and validate changes
 - file_read: Review existing configurations
 
 WORKFLOW:
@@ -161,10 +171,11 @@ WORKFLOW:
 2. Prioritize remediation based on analysis recommendations
 3. Generate corrected Terraform configurations
 4. Create new .tf files in {TERRAFORM_DIR}
-5. Generate Terraform plans for review
-6. Apply approved changes using safe procedures
-7. Validate remediation success
-8. Update shared memory with key "remediation_results"
+5. Use terraform_run_checkov_scan to ensure security compliance
+6. Use terraform_run_command with "plan" to generate Terraform plans for review
+7. Apply approved changes using terraform_run_command with "apply"
+8. Validate remediation success and document best practices followed
+9. Update shared memory with key "remediation_results"
 
 REMEDIATION APPROACH:
 - Start with highest priority/lowest risk changes

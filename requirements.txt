@@ -4,7 +4,7 @@ boto3==1.39.3
 botocore==1.39.3
 dill==0.4.0
 docstring_parser==0.16
-faiss==1.5.3
+faiss-cpu>=1.7.0
 fastapi==0.116.1
 httpx==0.28.1
 llama_api_client==0.1.2

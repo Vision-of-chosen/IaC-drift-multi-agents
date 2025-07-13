@@ -15,6 +15,9 @@ terraform {
   }
 }
 
+# Note: A default VPC (vpc-0913b9969b0533ea1) exists in the account.
+# This is standard for AWS accounts and does not represent a significant drift.
+# If a custom VPC is required, it should be defined here.
 # Configure the AWS Provider
 provider "aws" {
   region = var.aws_region
@@ -24,6 +27,8 @@ provider "aws" {
       Environment = var.environment
       Project     = "terraform-drift-detection"
       ManagedBy   = "terraform"
+      CreatedBy   = "RemediateAgent"
+      LastUpdated = formatdate("YYYY-MM-DD", timestamp())
     }
   }
 }
@@ -34,6 +39,12 @@ resource "random_string" "suffix" {
   special = false
   upper   = false
 }
+
+# Note: The following S3 buckets were detected but are not managed by Terraform:
+# - aws-cloudtrail-logs-hkt (Created: 2025-07-01)
+# - datmh-bedrock-kb (Created: 2025-07-12)
+# - genifast-drift-logs (Created: 2025-07-01)
+# These buckets should be reviewed for potential import into Terraform or exclusion from drift detection.
 
 # S3 Bucket for testing drift detection
 resource "aws_s3_bucket" "test_bucket" {

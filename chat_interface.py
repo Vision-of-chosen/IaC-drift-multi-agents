@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 BEDROCK_MODEL_ID = "apac.anthropic.claude-3-5-sonnet-20240620-v1:0"
 BEDROCK_REGION = "ap-southeast-2"
-TERRAFORM_DIR = "/home/dotuanminh/AI-backend/terraform"
+TERRAFORM_DIR = "./terraform"  # Using a relative path that works cross-platform
 
 
 def create_bedrock_model() -> BedrockModel:
