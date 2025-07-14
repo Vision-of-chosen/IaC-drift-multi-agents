@@ -388,3 +388,6 @@ Icon
 ._*
 
 mcp/
+samples/
+tools/ 
+sdk-python/
