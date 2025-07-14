@@ -24,8 +24,8 @@ from strands import Agent
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
 from strands_tools import use_aws
-from tools.src.strands_tools import cloudtrail_logs
-from tools.src.strands_tools import cloudwatch_logs
+from useful_tools import cloudtrail_logs
+from useful_tools import cloudwatch_logs
 
 # Import our custom read_tfstate tool
 try:
@@ -79,12 +79,11 @@ class DetectAgent:
     
     def _create_agent(self) -> Agent:
         """Create the detect agent instance"""
-        # Create a list of available tools
-        tools = [use_aws, cloudtrail_logs, cloudwatch_logs]
-        
-        # Add read_tfstate tool if available
+        # Create tools list based on availability of read_tfstate
         if read_tfstate:
-            tools.append(read_tfstate)
+            tools = [use_aws, cloudtrail_logs, cloudwatch_logs, read_tfstate]
+        else:
+            tools = [use_aws, cloudtrail_logs, cloudwatch_logs]
         
         return Agent(
             model=self.model,
