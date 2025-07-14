@@ -18,8 +18,8 @@ from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
 from strands_tools import use_aws
 from strands_tools import retrieve
-from tools.src.strands_tools import aws_documentation
-from tools.src.strands_tools import terraform_documentation
+from useful_tools.aws_documentation import aws_documentation_search
+from useful_tools.terraform_documentation import terraform_documentation_search
 
 from prompts import AgentPrompts
 from shared_memory import shared_memory
@@ -42,8 +42,8 @@ class DriftAnalyzerAgent:
             tools=[
                 use_aws,
                 retrieve,
-                aws_documentation,
-                terraform_documentation
+                aws_documentation_search,
+                terraform_documentation_search
             ],
             state=AgentState({
                 "shared_memory": shared_memory.data,
