@@ -154,7 +154,7 @@ class TerraformDriftChatInterface:
                     if hasattr(agent_result, 'message') and agent_result.message:
                         content = ""
                         if hasattr(agent_result.message, 'content'):
-                            for block in agent_result.message.content:
+                            for block in agent_result.message['content']:
                                 if isinstance(block, dict) and 'text' in block:
                                     content += block['text']
                         print(f"\n🤖 {node_id.title()}Agent:")
