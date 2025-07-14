@@ -21,7 +21,7 @@ from strands_tools import file_read
 from strands_tools import file_write
 from strands_tools import editor
 try:
-    from tools.src.strands_tools.terraform_mcp_tool import (
+    from useful_tools.terraform_mcp_tool import (
         terraform_run_command,
         terraform_run_checkov_scan,
         terraform_get_best_practices,
