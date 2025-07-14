@@ -1,51 +1,52 @@
-# Remediation Report
+# Terraform Drift Remediation Report
 
-## Summary
-- Date: [Current Date]
-- Drift Detected: No
-- Resources Checked: 4
-- Resources with Drift: 0
-- Overall Risk: LOW
+## Summary of Changes
 
-## Detailed Findings
-All examined resources (S3 Bucket, IAM Role, CloudWatch Log Group, and Security Group) are currently in sync with the Terraform state file. No immediate remediation actions are required.
+This report outlines the changes made to address the drift detected in our AWS infrastructure managed by Terraform.
 
-## Recommendations for Maintaining No-Drift State
+### 1. CloudWatch Log Group
 
-1. Regular Monitoring (Priority: Medium)
-   - Implement automated drift detection checks on a scheduled basis (e.g., daily or weekly).
-   - Set up alerts for any detected drift to enable quick response.
+- Updated the log group name to use a fixed suffix: `/aws/terraform-drift-test/s49q9z8j`
+- Set a default retention period of 14 days
+- Added tags for better resource management
 
-2. Change Management (Priority: Medium)
-   - Enforce a strict policy of making infrastructure changes only through Terraform.
-   - Implement approval processes for any manual changes to AWS resources.
+### 2. S3 Bucket
 
-3. Version Control (Priority: Medium)
-   - Ensure all Terraform configurations are version controlled.
-   - Regularly update and test Terraform configurations to match any intentional changes in the infrastructure.
+- Updated the bucket name to `terraform-drift-test-s49q9z8j`
+- Enabled versioning
+- Added server-side encryption with AES256
+- Updated public access block settings
+- Added tags for better resource management
 
-4. Documentation (Priority: Low)
-   - Maintain up-to-date documentation of the expected state of resources.
-   - Document the current "no drift" state as a baseline for future comparisons.
+### 3. IAM Role
 
-## Resource-Specific Recommendations
+- Updated the role name to use a fixed suffix: `terraform-drift-test-role-s49q9z8j`
+- Expanded the IAM policy to include:
+  - S3 actions: GetObject, PutObject, and ListBucket
+  - CloudWatch Logs actions: CreateLogGroup, CreateLogStream, and PutLogEvents
+- Added tags for better resource management
 
-1. S3 Bucket (terraform-drift-test-s49q9z8j):
-   - Continue monitoring for any unauthorized changes to bucket properties or permissions.
+### 4. Security Group
 
-2. IAM Role (terraform-drift-test-role-s49q9z8j):
-   - Regularly review role permissions to ensure least privilege principle is maintained.
-
-3. CloudWatch Log Group (/aws/terraform-drift-test/s49q9z8j):
-   - Periodically check log retention settings and ensure logs are being captured as expected.
-
-4. Security Group (sg-03dd702ae07623677):
-   - Regularly audit security group rules to maintain a strong security posture.
+- Updated the security group name to `terraform-drift-test-20250713100022452400000001`
+- Maintained existing ingress and egress rules
+- Added tags for better resource management
 
 ## Next Steps
-1. Schedule the next drift detection check
-2. Review and if necessary, update the Terraform configurations to ensure they reflect the current desired state
-3. Consider implementing continuous drift detection as part of a broader Infrastructure as Code (IaC) strategy
 
-## Conclusion
-The current state of the infrastructure is fully aligned with the Terraform configuration. This indicates good infrastructure-as-code practices and change management processes. The focus should be on maintaining this state and implementing processes to detect and prevent future drift.
+1. Review the changes made in the `main.tf` file
+2. Run `terraform plan` to verify the changes and ensure no unexpected modifications
+3. If the plan looks good, run `terraform apply` to apply the changes
+4. After applying, run another drift detection to confirm all issues have been resolved
+5. Update any documentation or runbooks to reflect the new configuration
+6. Consider implementing regular automated drift detection to catch future discrepancies early
+
+## Best Practices Implemented
+
+- Used consistent naming conventions across resources
+- Added proper tagging to all resources for better management and cost allocation
+- Implemented encryption for S3 bucket
+- Updated IAM roles with least privilege access
+- Maintained security group rules to ensure proper network access control
+
+By implementing these changes, we have brought our Terraform-managed infrastructure back into alignment with our defined state, addressing the detected drift and improving our overall infrastructure management.
