@@ -54,15 +54,15 @@ def create_terraform_drift_system():
     analyzer_node = builder.add_node(drift_analyzer_agent.get_agent(), "analyzer")
     remediate_node = builder.add_node(remediate_agent.get_agent(), "remediate")
     
-    # Define the workflow edges (dependencies)
+    # Define the workflow edges - all agents connect directly to Orchestration Agent
     # Orchestration → DetectAgent
     builder.add_edge(orchestration_node, detect_node)
     
-    # DetectAgent → DriftAnalyzerAgent
-    builder.add_edge(detect_node, analyzer_node)
+    # Orchestration → DriftAnalyzerAgent
+    builder.add_edge(orchestration_node, analyzer_node)
     
-    # DriftAnalyzerAgent → RemediateAgent
-    builder.add_edge(analyzer_node, remediate_node)
+    # Orchestration → RemediateAgent
+    builder.add_edge(orchestration_node, remediate_node)
     
     # Build the graph
     graph = builder.build()

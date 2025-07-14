@@ -31,8 +31,8 @@ AGENT_TYPES = {
 # Workflow Configuration
 WORKFLOW_EDGES = [
     ("orchestration", "detect"),
-    ("detect", "analyzer"),
-    ("analyzer", "remediate")
+    ("orchestration", "analyzer"),
+    ("orchestration", "remediate")
 ]
 
 # Shared Memory Keys
