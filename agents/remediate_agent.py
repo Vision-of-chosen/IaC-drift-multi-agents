@@ -47,4 +47,4 @@ class RemediateAgent:
     
     def update_shared_memory(self) -> None:
         """Update agent state with current shared memory"""
-        self.agent.state.data["shared_memory"] = shared_memory.data 
+        self.agent.state["shared_memory"] = shared_memory.data 

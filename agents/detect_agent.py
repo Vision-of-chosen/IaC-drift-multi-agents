@@ -44,7 +44,5 @@ class DetectAgent:
     def get_agent(self) -> Agent:
         """Get the agent instance"""
         return self.agent
-    
-    def update_shared_memory(self) -> None:
-        """Update agent state with current shared memory"""
-        self.agent.state.data["shared_memory"] = shared_memory.data 
+
+    # Removed update_shared_memory method - agents access shared memory directly through the global shared_memory object 

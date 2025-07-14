@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 
 # Import system components
 from shared_memory import shared_memory, initialize_shared_memory
-from chat_interface import create_terraform_drift_system
+from agents import OrchestrationAgent, DetectAgent, DriftAnalyzerAgent, RemediateAgent
+from strands.models.bedrock import BedrockModel
 from config import (
     BEDROCK_MODEL_ID,
     BEDROCK_REGION,
@@ -59,9 +60,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global system instance
-terraform_system = None
-system_agents = None
+# Global system agents
+individual_agents = None
 
 # Pydantic models for request/response
 class ChatRequest(BaseModel):
@@ -75,6 +75,32 @@ class ChatResponse(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
     session_id: Optional[str] = Field(None, description="Session identifier")
     agent_results: Optional[Dict[str, Any]] = Field(None, description="Detailed agent results")
+
+class AgentRequest(BaseModel):
+    message: str = Field(..., description="Message/instruction for the agent")
+    user_id: Optional[str] = Field(None, description="Optional user identifier")
+    session_id: Optional[str] = Field(None, description="Optional session identifier")
+
+class DetectResponse(BaseModel):
+    response: str = Field(..., description="Drift detection results")
+    status: str = Field(..., description="Processing status")
+    timestamp: datetime = Field(default_factory=datetime.now)
+    session_id: Optional[str] = Field(None, description="Session identifier")
+    drift_results: Optional[Dict[str, Any]] = Field(None, description="Structured drift detection results")
+
+class AnalyzeResponse(BaseModel):
+    response: str = Field(..., description="Drift analysis results")
+    status: str = Field(..., description="Processing status")
+    timestamp: datetime = Field(default_factory=datetime.now)
+    session_id: Optional[str] = Field(None, description="Session identifier")
+    analysis_results: Optional[Dict[str, Any]] = Field(None, description="Structured analysis results")
+
+class RemediateResponse(BaseModel):
+    response: str = Field(..., description="Remediation results")
+    status: str = Field(..., description="Processing status")
+    timestamp: datetime = Field(default_factory=datetime.now)
+    session_id: Optional[str] = Field(None, description="Session identifier")
+    remediation_results: Optional[Dict[str, Any]] = Field(None, description="Structured remediation results")
 
 class StatusResponse(BaseModel):
     status: str = Field(..., description="System status")
@@ -99,11 +125,37 @@ class ErrorResponse(BaseModel):
     detail: Optional[str] = Field(None, description="Error details")
     timestamp: datetime = Field(default_factory=datetime.now)
 
+def create_bedrock_model() -> BedrockModel:
+    """Create and configure the Bedrock model"""
+    return BedrockModel(
+        model_id=BEDROCK_MODEL_ID,
+        region_name=BEDROCK_REGION,
+    )
+
+def create_individual_agents():
+    """Create individual agents without graph dependencies"""
+    
+    # Create model
+    model = create_bedrock_model()
+    
+    # Create individual agents
+    orchestration_agent = OrchestrationAgent(model)
+    detect_agent = DetectAgent(model)
+    drift_analyzer_agent = DriftAnalyzerAgent(model)
+    remediate_agent = RemediateAgent(model)
+    
+    return {
+        'orchestration': orchestration_agent,
+        'detect': detect_agent,
+        'analyzer': drift_analyzer_agent,
+        'remediate': remediate_agent
+    }
+
 # Startup event
 @app.on_event("startup")
 async def startup_event():
     """Initialize the system on startup"""
-    global terraform_system, system_agents
+    global individual_agents
     
     try:
         logger.info("🚀 Initializing Terraform Drift Detection System...")
@@ -114,8 +166,8 @@ async def startup_event():
         # Initialize shared memory
         initialize_shared_memory()
         
-        # Create the system
-        terraform_system, system_agents = create_terraform_drift_system()
+        # Create individual agents
+        individual_agents = create_individual_agents()
         
         logger.info("✅ System initialized successfully")
         
@@ -132,14 +184,99 @@ async def shutdown_event():
         shared_memory.clear()
 
 # Dependency to get system instance
-async def get_system():
-    """Dependency to get the system instance"""
-    if terraform_system is None:
+async def get_agents():
+    """Dependency to get the individual agents"""
+    if individual_agents is None:
         raise HTTPException(
             status_code=503,
             detail="System not initialized"
         )
-    return terraform_system
+    return individual_agents
+
+# Helper functions to execute individual agents
+async def execute_detect_agent(message: str, agents: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute the detect agent independently"""
+    detect_agent = agents['detect']
+    
+    # Store the user request
+    shared_memory.set("user_request", message)
+    shared_memory.set("workflow_status", "detect_initiated")
+    
+    # Execute the detect agent
+    result = detect_agent.get_agent()(message)
+    
+    # Extract response content
+    response_content = ""
+    if hasattr(result, 'message') and result.message:
+        if hasattr(result.message, 'content'):
+            for block in result.message.content:
+                if isinstance(block, dict) and 'text' in block:
+                    response_content += block['text']
+    
+    # Update shared memory with detect status
+    shared_memory.set("workflow_status", "detect_completed")
+    
+    return {
+        "response": result,
+        "drift_results": shared_memory.get("drift_detection_results", {}),
+        "status": "completed"
+    }
+
+async def execute_analyze_agent(message: str, agents: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute the analyze agent independently"""
+    analyze_agent = agents['analyzer']
+    
+    # Store the user request
+    shared_memory.set("user_request", message)
+    shared_memory.set("workflow_status", "analyze_initiated")
+    
+    # Execute the analyze agent
+    result = analyze_agent.get_agent()(message)
+    
+    # Extract response content
+    response_content = ""
+    if hasattr(result, 'message') and result.message:
+        if hasattr(result.message, 'content'):
+            for block in result.message.content:
+                if isinstance(block, dict) and 'text' in block:
+                    response_content += block['text']
+    
+    # Update shared memory with analyze status
+    shared_memory.set("workflow_status", "analyze_completed")
+    
+    return {
+        "response": response_content,
+        "analysis_results": shared_memory.get("drift_analysis_results", {}),
+        "status": "completed"
+    }
+
+async def execute_remediate_agent(message: str, agents: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute the remediate agent independently"""
+    remediate_agent = agents['remediate']
+    
+    # Store the user request
+    shared_memory.set("user_request", message)
+    shared_memory.set("workflow_status", "remediate_initiated")
+    
+    # Execute the remediate agent
+    result = remediate_agent.get_agent()(message)
+    
+    # Extract response content
+    response_content = ""
+    if hasattr(result, 'message') and result.message:
+        if hasattr(result.message, 'content'):
+            for block in result.message.content:
+                if isinstance(block, dict) and 'text' in block:
+                    response_content += block['text']
+    
+    # Update shared memory with remediate status
+    shared_memory.set("workflow_status", "remediate_completed")
+    
+    return {
+        "response": response_content,
+        "remediation_results": shared_memory.get("remediation_results", {}),
+        "status": "completed"
+    }
 
 # Root endpoint
 @app.get("/")
@@ -152,6 +289,9 @@ async def root():
         "docs": "/docs",
         "endpoints": {
             "chat": "/chat",
+            "detect": "/detect",
+            "analyze": "/analyze",
+            "remediate": "/remediate",
             "status": "/status",
             "memory": "/memory",
             "commands": "/commands"
@@ -165,7 +305,7 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now(),
-        "system_initialized": terraform_system is not None
+        "system_initialized": individual_agents is not None
     }
 
 # Main chat endpoint
@@ -173,7 +313,7 @@ async def health_check():
 async def chat(
     request: ChatRequest,
     background_tasks: BackgroundTasks,
-    system = Depends(get_system)
+    agents = Depends(get_agents)
 ):
     """
     Main chat endpoint for processing user messages through the multi-agent system
@@ -209,32 +349,19 @@ async def chat(
                 session_id=request.session_id
             )
         
-        # Execute the graph with the user input
-        result = system.execute(request.message)
+        # Execute the orchestration agent
+        orchestration_agent = agents['orchestration']
         
-        # Process agent results
-        agent_results = {}
+        # Execute the orchestration agent
+        result = orchestration_agent.get_agent()(request.message)
+        
+        # Extract response content
         response_text = ""
-        
-        for node_id, node_result in result.results.items():
-            agent_results[node_id] = []
-            agent_responses = node_result.get_agent_results()
-            
-            for agent_result in agent_responses:
-                if hasattr(agent_result, 'message') and agent_result.message:
-                    content = ""
-                    if hasattr(agent_result.message, 'content'):
-                        for block in agent_result.message.content:
-                            if isinstance(block, dict) and 'text' in block:
-                                content += block['text']
-                    
-                    agent_results[node_id].append({
-                        "content": content,
-                        "timestamp": datetime.now()
-                    })
-                    
-                    # Add to response text
-                    response_text += f"\n🤖 {node_id.title()}Agent:\n{content}\n"
+        if hasattr(result, 'message') and result.message:
+            if hasattr(result.message, 'content'):
+                for block in result.message.content:
+                    if isinstance(block, dict) and 'text' in block:
+                        response_text += block['text']
         
         # Update workflow status
         shared_memory.set("workflow_status", "completed")
@@ -242,8 +369,7 @@ async def chat(
         return ChatResponse(
             response=response_text.strip() if response_text else "Request processed successfully",
             status="completed",
-            session_id=request.session_id,
-            agent_results=agent_results
+            session_id=request.session_id
         )
         
     except Exception as e:
@@ -254,6 +380,103 @@ async def chat(
         raise HTTPException(
             status_code=500,
             detail=f"Error processing request: {str(e)}"
+        )
+
+# Individual agent endpoints
+@app.post("/detect", response_model=DetectResponse)
+async def detect(
+    request: AgentRequest,
+    background_tasks: BackgroundTasks,
+    agents = Depends(get_agents)
+):
+    """
+    Detect drift between Terraform state and actual AWS infrastructure
+    """
+    try:
+        logger.info(f"Processing detect request: {request.message}")
+        
+        # Execute the detect agent
+        result = await execute_detect_agent(request.message, agents)
+        
+        return DetectResponse(
+            response=result["response"],
+            status=result["status"],
+            session_id=request.session_id,
+            drift_results=result["drift_results"]
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing detect request: {e}")
+        shared_memory.set("workflow_status", "failed")
+        shared_memory.set("last_error", str(e))
+        
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing detect request: {str(e)}"
+        )
+
+@app.post("/analyze", response_model=AnalyzeResponse)
+async def analyze(
+    request: AgentRequest,
+    background_tasks: BackgroundTasks,
+    agents = Depends(get_agents)
+):
+    """
+    Analyze detected drift for severity and impact assessment
+    """
+    try:
+        logger.info(f"Processing analyze request: {request.message}")
+        
+        # Execute the analyze agent
+        result = await execute_analyze_agent(request.message, agents)
+        
+        return AnalyzeResponse(
+            response=result["response"],
+            status=result["status"],
+            session_id=request.session_id,
+            analysis_results=result["analysis_results"]
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing analyze request: {e}")
+        shared_memory.set("workflow_status", "failed")
+        shared_memory.set("last_error", str(e))
+        
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing analyze request: {str(e)}"
+        )
+
+@app.post("/remediate", response_model=RemediateResponse)
+async def remediate(
+    request: AgentRequest,
+    background_tasks: BackgroundTasks,
+    agents = Depends(get_agents)
+):
+    """
+    Remediate infrastructure drift by applying corrective changes
+    """
+    try:
+        logger.info(f"Processing remediate request: {request.message}")
+        
+        # Execute the remediate agent
+        result = await execute_remediate_agent(request.message, agents)
+        
+        return RemediateResponse(
+            response=result["response"],
+            status=result["status"],
+            session_id=request.session_id,
+            remediation_results=result["remediation_results"]
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing remediate request: {e}")
+        shared_memory.set("workflow_status", "failed")
+        shared_memory.set("last_error", str(e))
+        
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing remediate request: {str(e)}"
         )
 
 # System status endpoint
@@ -278,7 +501,7 @@ async def get_system_status():
             terraform_dir=TERRAFORM_DIR,
             aws_region=BEDROCK_REGION,
             model_id=BEDROCK_MODEL_ID,
-            agents_count=len(system_agents) if system_agents else 0,
+            agents_count=len(individual_agents) if individual_agents else 0,
             workflow_status=workflow_status,
             tf_files_count=tf_files_count,
             state_files_count=state_files_count
@@ -349,24 +572,23 @@ def _get_help_response() -> str:
     help_text = """
 🔧 Terraform Drift Detection & Remediation System
 
-Available Commands:
-• detect - Run drift detection
-• analyze - Analyze detected drift
-• remediate - Apply drift remediation
-• status - Check system status
-• memory - View shared memory
-• help - Show this help
+Available Endpoints:
+• /chat - General coordination and guidance (uses OrchestrationAgent)
+• /detect - Run drift detection independently (uses DetectAgent)
+• /analyze - Analyze detected drift independently (uses DriftAnalyzerAgent)
+• /remediate - Apply drift remediation independently (uses RemediateAgent)
+• /status - Check system status
+• /memory - View shared memory
+• /commands - View available commands
 
-Example Usage:
-• "detect"
-• "analyze high priority drift"
-• "remediate security issues only"
-
-The system uses 4 specialized agents:
-• OrchestrationAgent - Coordinates the workflow
+Each agent works independently and returns results immediately:
+• OrchestrationAgent - Provides guidance and coordination
 • DetectAgent - Finds drift between Terraform state and AWS
 • DriftAnalyzerAgent - Analyzes impact and provides recommendations
 • RemediateAgent - Applies fixes to remediate drift
+
+Usage:
+POST to individual endpoints with {"message": "your instruction"}
 """
     return help_text.strip()
 
