@@ -24,6 +24,7 @@ from strands import Agent
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
 from strands_tools import use_aws
+
 from useful_tools import cloudtrail_logs
 from useful_tools import cloudwatch_logs
 

@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 from strands import Agent
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
-from strands_tools import use_aws
-from strands_tools import retrieve
+from strands_tools import use_aws, retrieve
+
 from useful_tools.aws_documentation import aws_documentation_search
 from useful_tools.terraform_documentation import terraform_documentation_search
 
