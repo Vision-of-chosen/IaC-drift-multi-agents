@@ -50,15 +50,6 @@ class OrchestrationAgent:
             tools = [
             # Core AWS and state tools
             use_aws,
-            cloudtrail_logs, 
-            cloudwatch_logs,
-            
-            # Terraform operational tools
-            terraform_plan,
-            terraform_apply,
-            terraform_import,
-            terraform_run_command,
-            terraform_run_checkov_scan,
             
             # Documentation and reference tools
             aws_documentation_search,

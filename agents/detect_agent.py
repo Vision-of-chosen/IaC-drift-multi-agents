@@ -82,7 +82,7 @@ class DetectAgent:
         """Create the detect agent instance"""
         # Create tools list based on availability of read_tfstate
         if read_tfstate:
-            tools = [use_aws, cloudtrail_logs, cloudwatch_logs, read_tfstate]
+            tools = [use_aws, read_tfstate]
         else:
             tools = [use_aws, cloudtrail_logs, cloudwatch_logs]
         
