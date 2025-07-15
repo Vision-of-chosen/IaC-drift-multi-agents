@@ -18,6 +18,16 @@ from strands import Agent
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
 
+from strands_tools import use_aws
+
+# Import additional useful tools for comprehensive drift detection
+from useful_tools import cloudtrail_logs
+from useful_tools import cloudwatch_logs
+from useful_tools.terraform_tools import terraform_plan, terraform_apply, terraform_import
+from useful_tools.terraform_mcp_tool import terraform_run_command, terraform_run_checkov_scan
+from useful_tools.aws_documentation import aws_documentation_search
+from useful_tools.terraform_documentation import terraform_documentation_search
+
 from prompts import AgentPrompts
 from shared_memory import shared_memory
 from config import BEDROCK_REGION
@@ -37,7 +47,23 @@ class OrchestrationAgent:
             system_prompt=AgentPrompts.get_prompt("orchestration"),
             name="OrchestrationAgent",
             description="Central coordinator for the Terraform Drift Detection & Remediation System",
-            tools=[self._set_shared_memory_wrapper],
+            tools = [
+            # Core AWS and state tools
+            use_aws,
+            cloudtrail_logs, 
+            cloudwatch_logs,
+            
+            # Terraform operational tools
+            terraform_plan,
+            terraform_apply,
+            terraform_import,
+            terraform_run_command,
+            terraform_run_checkov_scan,
+            
+            # Documentation and reference tools
+            aws_documentation_search,
+            terraform_documentation_search
+        ],
             state=AgentState({
                 "shared_memory": shared_memory.data,
                 "agent_type": "orchestration",
