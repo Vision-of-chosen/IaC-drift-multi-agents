@@ -11,7 +11,7 @@ BEDROCK_MODEL_ID = "apac.anthropic.claude-3-5-sonnet-20240620-v1:0"
 BEDROCK_REGION = "ap-southeast-2"
 
 # Terraform Configuration
-TERRAFORM_DIR = "/home/dotuanminh/AI-backend/terraform"
+TERRAFORM_DIR = "./terraform"  # Using a relative path that works cross-platform
 
 # System Configuration
 LOGGING_LEVEL = "INFO"
@@ -31,8 +31,8 @@ AGENT_TYPES = {
 # Workflow Configuration
 WORKFLOW_EDGES = [
     ("orchestration", "detect"),
-    ("detect", "analyzer"),
-    ("analyzer", "remediate")
+    ("orchestration", "analyzer"),
+    ("orchestration", "remediate")
 ]
 
 # Shared Memory Keys

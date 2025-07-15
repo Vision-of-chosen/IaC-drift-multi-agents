@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 BEDROCK_MODEL_ID = "apac.anthropic.claude-3-5-sonnet-20240620-v1:0"
 BEDROCK_REGION = "ap-southeast-2"
-TERRAFORM_DIR = "/home/dotuanminh/AI-backend/terraform"
+TERRAFORM_DIR = "./terraform"  # Using a relative path that works cross-platform
 
 
 def create_bedrock_model() -> BedrockModel:
@@ -54,15 +54,15 @@ def create_terraform_drift_system():
     analyzer_node = builder.add_node(drift_analyzer_agent.get_agent(), "analyzer")
     remediate_node = builder.add_node(remediate_agent.get_agent(), "remediate")
     
-    # Define the workflow edges (dependencies)
+    # Define the workflow edges - all agents connect directly to Orchestration Agent
     # Orchestration → DetectAgent
     builder.add_edge(orchestration_node, detect_node)
     
-    # DetectAgent → DriftAnalyzerAgent
-    builder.add_edge(detect_node, analyzer_node)
+    # Orchestration → DriftAnalyzerAgent
+    builder.add_edge(orchestration_node, analyzer_node)
     
-    # DriftAnalyzerAgent → RemediateAgent
-    builder.add_edge(analyzer_node, remediate_node)
+    # Orchestration → RemediateAgent
+    builder.add_edge(orchestration_node, remediate_node)
     
     # Build the graph
     graph = builder.build()
@@ -154,7 +154,7 @@ class TerraformDriftChatInterface:
                     if hasattr(agent_result, 'message') and agent_result.message:
                         content = ""
                         if hasattr(agent_result.message, 'content'):
-                            for block in agent_result.message.content:
+                            for block in agent_result.message['content']:
                                 if isinstance(block, dict) and 'text' in block:
                                     content += block['text']
                         print(f"\n🤖 {node_id.title()}Agent:")

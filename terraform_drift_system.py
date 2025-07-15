@@ -39,10 +39,14 @@ logger = logging.getLogger(__name__)
 # Add tools to path
 sys.path.append("tools/src")
 
+# Add useful_tools to path
+useful_tools_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "useful_tools")
+sys.path.append(useful_tools_path)
+
 from chat_interface import TerraformDriftChatInterface
 
 # Configuration
-TERRAFORM_DIR = "/home/dotuanminh/AI-backend/terraform"
+TERRAFORM_DIR = "./terraform"
 
 
 def main():
