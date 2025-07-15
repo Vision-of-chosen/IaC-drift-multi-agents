@@ -12,6 +12,15 @@ BEDROCK_REGION = "ap-southeast-2"
 
 # Terraform Configuration
 TERRAFORM_DIR = "./terraform"  # Using a relative path that works cross-platform
+TERRAFORM_BASE_DIR = "./terraform_users"  # Base directory for user-specific terraform files
+
+# Multi-user Configuration
+def get_user_terraform_dir(user_id: str) -> str:
+    """Get the terraform directory for a specific user"""
+    import os
+    user_dir = os.path.join(TERRAFORM_BASE_DIR, user_id)
+    os.makedirs(user_dir, exist_ok=True)
+    return user_dir
 
 # System Configuration
 LOGGING_LEVEL = "INFO"
