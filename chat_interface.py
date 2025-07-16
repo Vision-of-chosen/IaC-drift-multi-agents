@@ -10,6 +10,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Dict, Any
+from datetime import datetime
 
 from strands.multiagent.graph import GraphBuilder
 from strands.models.bedrock import BedrockModel
@@ -140,6 +141,18 @@ class TerraformDriftChatInterface:
             # Store the user request in shared memory
             shared_memory.set("user_request", user_input)
             shared_memory.set("workflow_status", "initiated")
+            shared_memory.set("request_timestamp", datetime.now().isoformat())
+            
+            # Add request to history
+            if "request_history" not in shared_memory.data:
+                shared_memory.set("request_history", [])
+            
+            request_history = shared_memory.get("request_history", [])
+            request_history.append({
+                "request": user_input,
+                "timestamp": datetime.now().isoformat()
+            })
+            shared_memory.set("request_history", request_history[-5:])  # Keep last 5 requests
             
             # Execute the graph with the user input
             result = self.graph.execute(user_input)
@@ -150,23 +163,66 @@ class TerraformDriftChatInterface:
             # Display results from each agent
             for node_id, node_result in result.results.items():
                 agent_results = node_result.get_agent_results()
-                for agent_result in agent_results:
+                for i, agent_result in enumerate(agent_results):
+                    # Lấy agent từ danh sách agents
+                    agent = self.agents.get(node_id)
+                    if agent:
+                        # Cập nhật trạng thái agent
+                        agent.update_agent_status(f"Processed request: {user_input[:50]}...")
+                    
+                    # Xử lý nội dung phản hồi
+                    content = ""
                     if hasattr(agent_result, 'message') and agent_result.message:
-                        content = ""
+                        # Cách 1: Thử lấy từ message.content là list
                         if hasattr(agent_result.message, 'content'):
-                            for block in agent_result.message['content']:
-                                if isinstance(block, dict) and 'text' in block:
-                                    content += block['text']
+                            if isinstance(agent_result.message.content, list):
+                                for block in agent_result.message.content:
+                                    if isinstance(block, dict) and 'text' in block:
+                                        content += block['text']
+                            # Cách 2: Nếu content là string
+                            elif isinstance(agent_result.message.content, str):
+                                content = agent_result.message.content
+                        
+                        # Cách 3: Nếu message là dict
+                        elif isinstance(agent_result.message, dict):
+                            if 'content' in agent_result.message:
+                                if isinstance(agent_result.message['content'], list):
+                                    for block in agent_result.message['content']:
+                                        if isinstance(block, dict) and 'text' in block:
+                                            content += block['text']
+                                elif isinstance(agent_result.message['content'], str):
+                                    content = agent_result.message['content']
+                    
+                    # Cách 4: Nếu tất cả thất bại, thử lấy chuỗi string từ message
+                    if not content and hasattr(agent_result, 'message'):
+                        content = str(agent_result.message)
+                    
+                    # In nội dung gỡ lỗi
+                    print(f"DEBUG: {node_id} message type: {type(agent_result.message)}")
+                    print(f"DEBUG: {node_id} content length: {len(content)}")
+                    
+                    # Lưu vào shared_memory với nội dung có giá trị
+                    shared_memory.set(f"{node_id}_response_{i}", {
+                        "content": content if content else agent_result.message if hasattr(agent_result, 'message') else "No extractable content",
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    
+                    # Hiển thị nội dung từ agent
+                    if content:
                         print(f"\n🤖 {node_id.title()}Agent:")
                         print(content[:500] + "..." if len(content) > 500 else content)
             
             # Update workflow status
             shared_memory.set("workflow_status", "completed")
+            shared_memory.set("completion_timestamp", datetime.now().isoformat())
             
         except Exception as e:
             print(f"❌ Error processing request: {e}")
+            import traceback
+            traceback.print_exc()  # In stack trace để dễ gỡ lỗi
             shared_memory.set("workflow_status", "failed")
             shared_memory.set("last_error", str(e))
+            shared_memory.set("error_timestamp", datetime.now().isoformat())
     
     def show_help(self):
         """Show help information"""
@@ -219,7 +275,43 @@ class TerraformDriftChatInterface:
         print("\n🧠 Shared Memory Contents")
         print("-" * 30)
         if shared_memory.data:
-            for key, value in shared_memory.data.items():
-                print(f"{key}: {str(value)[:100]}...")
+            # Sắp xếp keys để dễ đọc
+            sorted_keys = sorted(shared_memory.data.keys())
+            for key in sorted_keys:
+                value = shared_memory.data[key]
+                
+                # Hiển thị chi tiết tùy theo loại key
+                if "_response_" in key and isinstance(value, dict):
+                    print(f"• {key}:")
+                    # Hiển thị nội dung phản hồi với độ dài hợp lý
+                    if "content" in value and value["content"]:
+                        content = value["content"]
+                        if isinstance(content, str) and len(content) > 100:
+                            print(f"  - content: {content[:100]}...")
+                            print(f"  - content_length: {len(content)} characters")
+                        else:
+                            print(f"  - content: {content}")
+                    
+                    # Hiển thị thời gian
+                    if "timestamp" in value:
+                        print(f"  - timestamp: {value['timestamp']}")
+                
+                # Hiển thị status của agent
+                elif "_status" in key and isinstance(value, dict):
+                    print(f"• {key}:")
+                    for sub_key, sub_value in value.items():
+                        if isinstance(sub_value, dict):
+                            print(f"  - {sub_key}: {json.dumps(sub_value, indent=2)[:80]}...")
+                        else:
+                            sub_str = str(sub_value)
+                            print(f"  - {sub_key}: {sub_str[:80] + '...' if len(sub_str) > 80 else sub_str}")
+                
+                # Hiển thị các giá trị khác
+                else:
+                    value_str = str(value)
+                    if len(value_str) > 100:
+                        print(f"• {key}: {value_str[:100]}...")
+                    else:
+                        print(f"• {key}: {value_str}")
         else:
             print("(Empty)") 
