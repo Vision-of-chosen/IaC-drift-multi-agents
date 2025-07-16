@@ -24,7 +24,7 @@ from strands import Agent
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
 from strands_tools import use_aws
-
+from datetime import datetime
 from useful_tools import cloudtrail_logs
 from useful_tools import cloudwatch_logs
 
@@ -86,18 +86,19 @@ class DetectAgent:
         else:
             tools = [use_aws, cloudtrail_logs, cloudwatch_logs]
         
-        return Agent(
+        agent = Agent(
             model=self.model,
             system_prompt=AgentPrompts.get_prompt("detect"),
             name="DetectAgent",
             description="Specialist in detecting Terraform infrastructure drift by comparing state files with actual AWS resources",
             tools=tools,
-            state=AgentState({
-                "shared_memory": shared_memory.data,
-                "agent_type": "detection",
-                "aws_region": self.region  # Add AWS region to state so agent knows which region to use
-            })
         )
+        agent.state = AgentState()
+        agent.state.shared_memory = shared_memory.data
+        agent.state.agent_type = "detection"
+        agent.state.aws_region = self.region
+        return agent
+
     
     def get_agent(self) -> Agent:
         """Get the agent instance"""
@@ -106,7 +107,10 @@ class DetectAgent:
     def update_shared_memory(self) -> None:
         """Update agent state with current shared memory"""
         # Create a new state object with updated shared memory
-        self.agent.state = AgentState({
+        if hasattr(self.agent, 'state'):
+            self.agent.state.shared_memory = shared_memory.data
+        else:
+            self.agent.state = AgentState({
             "shared_memory": shared_memory.data,
             "agent_type": "detection",
             "aws_region": self.region  # Preserve the AWS region in state updates
@@ -186,3 +190,30 @@ class DetectAgent:
         except Exception as e:
             logger.error(f"Error reading Terraform state file: {e}")
             return {} 
+    # Thêm phương thức detect_drift tại đây
+    def detect_drift(self, resources=None):
+        """Detect drift in the specified resources or all resources"""
+        result = self.agent.run(f"Detect drift in terraform infrastructure for resources: {resources if resources else 'all'}")
+        
+        # Cập nhật trạng thái vào shared memory
+        self.update_agent_status({
+            "action": "detect_drift",
+            "resources": resources if resources else "all",
+            "completion_time": datetime.now().isoformat(),
+            "status": "completed"
+        })
+        
+        return result
+        
+    def update_agent_status(self, status_info):
+        """Update agent status in shared memory"""
+        agent_type = self.agent.state.agent_type
+        status_key = f"{agent_type}_status"
+        
+        status_data = {
+            "status": status_info,
+            "timestamp": datetime.now().isoformat(),
+            "agent": agent_type
+        }
+        
+        shared_memory.set(status_key, status_data)
