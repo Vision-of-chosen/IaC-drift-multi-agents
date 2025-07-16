@@ -63,7 +63,7 @@ def terraform_documentation_search(
     try:
         # Create MCP client
         mcp_client = get_terraform_mcp_client()
-        
+            
         logger.info(f"Querying Terraform documentation for {provider} {asset_type}: {asset_name}")
         
         # Execute the query through the MCP server
@@ -125,7 +125,7 @@ def terraform_documentation_search(
                             logger.error(f"Error parsing MCP result: {e}")
                             # If not JSON, use the text as is
                             docs_results.append({"description": item['text']})
-            
+                
             # Format the results for the agent
             formatted_results = []
             for doc in docs_results:
@@ -161,7 +161,7 @@ def terraform_documentation_search(
                             formatted_doc["attributes"].append({
                                 "name": attr.get("name", ""),
                                 "description": attr.get("description", "")
-                            })
+                })
                 
                 # Add examples if available
                 if isinstance(doc, dict) and "examples" in doc and isinstance(doc["examples"], list):
