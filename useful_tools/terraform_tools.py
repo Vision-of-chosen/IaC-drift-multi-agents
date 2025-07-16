@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 MCP_SERVER_COMMAND = os.environ.get("TF_TOOLS_MCP_SERVER_COMMAND", "uvx")
 MCP_SERVER_ARGS = os.environ.get(
     "TF_TOOLS_MCP_SERVER_ARGS", 
-    "awslabs.terraform-tools-mcp-server@latest"
+    "awslabs.terraform-mcp-server@latest"
 ).split()
 
 def get_terraform_tools_mcp_client() -> MCPClient:
