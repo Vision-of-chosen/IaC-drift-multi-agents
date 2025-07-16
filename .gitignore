@@ -393,3 +393,4 @@ tools/
 sdk-python/
 
 *.ipynb
+test_prompts_integration.py
