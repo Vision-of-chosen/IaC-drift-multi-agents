@@ -33,6 +33,7 @@ except ImportError:
 from prompts import AgentPrompts
 from shared_memory import shared_memory
 from config import BEDROCK_REGION, TERRAFORM_DIR
+from permission_handlers import create_agent_callback_handler
 
 class RemediateAgent:
     """Specialist in automated Terraform infrastructure remediation"""
@@ -72,6 +73,7 @@ class RemediateAgent:
             system_prompt=AgentPrompts.get_prompt("remediate"),
             name="RemediateAgent",
             description="Specialist in automated Terraform infrastructure remediation using AWS best practices",
+            callback_handler=create_agent_callback_handler("RemediateAgent"),
             tools=tools,
             state=AgentState({
                 "shared_memory": shared_memory.data,

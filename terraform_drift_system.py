@@ -44,14 +44,67 @@ useful_tools_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "us
 sys.path.append(useful_tools_path)
 
 from chat_interface import TerraformDriftChatInterface
+from permission_handlers import configure_permission_manager, get_permission_status
 
 # Configuration
 TERRAFORM_DIR = "./terraform"
 
 
+def configure_system_permissions():
+    """
+    Configure permission settings for the drift detection system.
+    You can customize this based on your security requirements.
+    """
+    logger.info("Configuring system permissions...")
+    
+    # Configure for development environment (you can change this)
+    auto_approve_tools = [
+        # Read-only tools that are generally safe
+        "current_time",
+        "file_read", 
+        "calculator",
+        "aws_documentation_search",
+        "terraform_documentation_search",
+        "retrieve",
+        "read_tfstate",
+        "cloudtrail_logs",
+        "cloudwatch_logs",
+        # Planning tools (safe to run)
+        "terraform_plan",
+        "terraform_get_best_practices",
+        "terraform_get_provider_docs"
+    ]
+    
+    require_approval_tools = [
+        # Tools that can modify infrastructure or files
+        "terraform_apply",
+        "terraform_run_command", 
+        "file_write",
+        "editor",
+        "terraform_run_checkov_scan",
+        "use_aws",  # AWS operations require approval
+        "shell"
+    ]
+    
+    configure_permission_manager(
+        auto_approve_tools=auto_approve_tools,
+        require_approval_tools=require_approval_tools
+    )
+    
+    status = get_permission_status()
+    logger.info(f"Permissions configured: {len(status['auto_approve_tools'])} auto-approved, {len(status['require_approval_tools'])} require approval")
+    
+    return status
+
+
 def main():
     """Main entry point"""
     print("🏗️  Initializing Terraform Drift Detection & Remediation System...")
+    
+    # Configure permission system
+    print("🔐 Configuring permission system...")
+    configure_system_permissions()
+    print("✅ Permission system configured!")
     
     # Ensure terraform directory exists
     os.makedirs(TERRAFORM_DIR, exist_ok=True)

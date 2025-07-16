@@ -68,6 +68,7 @@ except Exception as e:
 from prompts import AgentPrompts
 from shared_memory import shared_memory
 from config import BEDROCK_REGION
+from permission_handlers import create_agent_callback_handler
 
 
 class DetectAgent:
@@ -91,6 +92,7 @@ class DetectAgent:
             system_prompt=AgentPrompts.get_prompt("detect"),
             name="DetectAgent",
             description="Specialist in detecting Terraform infrastructure drift by comparing state files with actual AWS resources",
+            callback_handler=create_agent_callback_handler("DetectAgent"),
             tools=tools,
             state=AgentState({
                 "shared_memory": shared_memory.data,

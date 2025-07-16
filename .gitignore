@@ -391,3 +391,11 @@ mcp/
 samples/
 tools/ 
 sdk-python/
+
+.cursorignore
+*.ipynb
+test_agents_with_permissions.py
+test_deny_all_functionality.py  
+test_permission_system.py
+
+terraform/s3_buckets.tf
