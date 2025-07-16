@@ -12,7 +12,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append("tools/src")
 
 logger = logging.getLogger(__name__)
-
+from datetime import datetime
 from strands import Agent
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
@@ -67,18 +67,18 @@ class RemediateAgent:
                 editor
             ]
         
-        return Agent(
+        agent = Agent(
             model=self.model,
             system_prompt=AgentPrompts.get_prompt("remediate"),
             name="RemediateAgent",
             description="Specialist in automated Terraform infrastructure remediation using AWS best practices",
             tools=tools,
-            state=AgentState({
-                "shared_memory": shared_memory.data,
-                "agent_type": "remediation",
-                "terraform_dir": self.terraform_dir
-            })
         )
+        agent.state = AgentState()
+        agent.state.shared_memory = shared_memory.data
+        agent.state.agent_type = "remediation"
+        agent.state.terraform_dir = self.terraform_dir
+        return agent
     
     def get_agent(self) -> Agent:
         """Get the agent instance"""
@@ -86,7 +86,10 @@ class RemediateAgent:
     
     def update_shared_memory(self) -> None:
         """Update agent state with current shared memory"""
-        self.agent.state = AgentState({
+        if hasattr(self.agent, 'state'):
+            self.agent.state.shared_memory = shared_memory.data
+        else:
+            self.agent.state = AgentState({
             "shared_memory": shared_memory.data,
             "agent_type": "remediation",
             "terraform_dir": self.terraform_dir
@@ -96,3 +99,15 @@ class RemediateAgent:
         """Wrapper for setting values in shared memory"""
         shared_memory.set(key, value)
         return {"status": "success", "message": f"Value set for key: {key}"} 
+    def update_agent_status(self, status_info):
+        """Update agent status in shared memory"""
+        agent_type = self.agent.state.agent_type
+        status_key = f"{agent_type}_status"
+        
+        status_data = {
+            "status": status_info,
+            "timestamp": datetime.now().isoformat(),
+            "agent": agent_type
+        }
+        
+        shared_memory.set(status_key, status_data)
