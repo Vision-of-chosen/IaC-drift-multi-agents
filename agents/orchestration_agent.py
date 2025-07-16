@@ -31,6 +31,7 @@ from useful_tools.terraform_documentation import terraform_documentation_search
 from prompts import AgentPrompts
 from shared_memory import shared_memory
 from config import BEDROCK_REGION
+from permission_handlers import create_agent_callback_handler
 
 class OrchestrationAgent:
     """Central coordinator for the multi-agent system"""
@@ -47,6 +48,7 @@ class OrchestrationAgent:
             system_prompt=AgentPrompts.get_prompt("orchestration"),
             name="OrchestrationAgent",
             description="Central coordinator for the Terraform Drift Detection & Remediation System",
+            callback_handler=create_agent_callback_handler("OrchestrationAgent"),
             tools = [
                 # Core AWS and state tools
                 use_aws,

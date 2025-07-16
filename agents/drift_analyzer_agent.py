@@ -24,7 +24,7 @@ from useful_tools.terraform_documentation import terraform_documentation_search
 from prompts import AgentPrompts
 from shared_memory import shared_memory
 from config import BEDROCK_REGION
-
+from permission_handlers import create_agent_callback_handler
 class DriftAnalyzerAgent:
     """Specialist in analyzing and assessing infrastructure drift impacts"""
     
@@ -39,6 +39,7 @@ class DriftAnalyzerAgent:
             system_prompt=AgentPrompts.get_prompt("analyzer"),
             name="DriftAnalyzerAgent",
             description="Specialist in analyzing drift severity and business impact",
+            callback_handler=create_agent_callback_handler("DriftAnalyzerAgent"),
             tools=[
                 use_aws,
                 retrieve,

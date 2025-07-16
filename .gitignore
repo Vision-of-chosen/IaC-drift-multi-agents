@@ -391,3 +391,5 @@ mcp/
 samples/
 tools/ 
 sdk-python/
+
+*.ipynb
