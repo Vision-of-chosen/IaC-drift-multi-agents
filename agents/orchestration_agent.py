@@ -19,7 +19,7 @@ from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
 
 from strands_tools import use_aws
-
+from datetime import datetime
 # Import additional useful tools for comprehensive drift detection
 from useful_tools import cloudtrail_logs
 from useful_tools import cloudwatch_logs
@@ -42,34 +42,37 @@ class OrchestrationAgent:
     
     def _create_agent(self) -> Agent:
         """Create the orchestration agent instance"""
-        return Agent(
+        agent = Agent(
             model=self.model,
             system_prompt=AgentPrompts.get_prompt("orchestration"),
             name="OrchestrationAgent",
             description="Central coordinator for the Terraform Drift Detection & Remediation System",
             tools = [
-            # Core AWS and state tools
-            use_aws,
-            cloudtrail_logs, 
-            cloudwatch_logs,
-            
-            # Terraform operational tools
-            terraform_plan,
-            terraform_apply,
-            terraform_import,
-            terraform_run_command,
-            terraform_run_checkov_scan,
-            
-            # Documentation and reference tools
-            aws_documentation_search,
-            terraform_documentation_search
-        ],
-            state=AgentState({
-                "shared_memory": shared_memory.data,
-                "agent_type": "orchestration",
-                "aws_region": self.region
-            })
+                # Core AWS and state tools
+                use_aws,
+                cloudtrail_logs, 
+                cloudwatch_logs,
+                
+                # Terraform operational tools
+                terraform_plan,
+                terraform_apply,
+                terraform_import,
+                terraform_run_command,
+                terraform_run_checkov_scan,
+                
+                # Documentation and reference tools
+                aws_documentation_search,
+                terraform_documentation_search
+            ]
         )
+        
+        # Set state after creating agent
+        agent.state = AgentState()
+        agent.state.shared_memory = shared_memory.data
+        agent.state.agent_type = "orchestration" 
+        agent.state.aws_region = self.region
+        
+        return agent
     
     def get_agent(self) -> Agent:
         """Get the agent instance"""
@@ -78,7 +81,10 @@ class OrchestrationAgent:
     def update_shared_memory(self) -> None:
         """Update agent state with current shared memory"""
         # Create a new state object with updated shared memory
-        self.agent.state = AgentState({
+        if hasattr(self.agent, 'state'):
+            self.agent.state.shared_memory = shared_memory.data
+        else:
+            self.agent.state = AgentState({
             "shared_memory": shared_memory.data,
             "agent_type": "orchestration",
             "aws_region": self.region
@@ -103,3 +109,15 @@ class OrchestrationAgent:
             "status": "success",
             "message": f"Successfully stored data in shared memory with key: {key}"
         } 
+    def update_agent_status(self, status_info):
+        """Update agent status in shared memory"""
+        agent_type = self.agent.state.agent_type
+        status_key = f"{agent_type}_status"
+        
+        status_data = {
+            "status": status_info,
+            "timestamp": datetime.now().isoformat(),
+            "agent": agent_type
+        }
+        
+        shared_memory.set(status_key, status_data)
