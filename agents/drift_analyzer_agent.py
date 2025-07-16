@@ -17,7 +17,7 @@ from strands import Agent
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
 from strands_tools import use_aws, retrieve
-
+from datetime import datetime
 from useful_tools.aws_documentation import aws_documentation_search
 from useful_tools.terraform_documentation import terraform_documentation_search
 
@@ -34,7 +34,7 @@ class DriftAnalyzerAgent:
         
     def _create_agent(self) -> Agent:
         """Create the drift analyzer agent instance"""
-        return Agent(
+        agent = Agent(
             model=self.model,
             system_prompt=AgentPrompts.get_prompt("analyzer"),
             name="DriftAnalyzerAgent",
@@ -44,12 +44,15 @@ class DriftAnalyzerAgent:
                 retrieve,
                 aws_documentation_search,
                 terraform_documentation_search
-            ],
-            state=AgentState({
-                "shared_memory": shared_memory.data,
-                "agent_type": "analyzer"
-            })
+            ]
         )
+        
+        # Set state after creating agent
+        agent.state = AgentState()
+        agent.state.shared_memory = shared_memory.data
+        agent.state.agent_type = "analyzer"
+        
+        return agent
     
     def get_agent(self) -> Agent:
         """Get the agent instance"""
@@ -57,7 +60,10 @@ class DriftAnalyzerAgent:
     
     def update_shared_memory(self) -> None:
         """Update agent state with current shared memory"""
-        self.agent.state = AgentState({
+        if hasattr(self.agent, 'state'):
+            self.agent.state.shared_memory = shared_memory.data
+        else:
+            self.agent.state = AgentState({
             "shared_memory": shared_memory.data,
             "agent_type": "analyzer"
         })
@@ -66,3 +72,15 @@ class DriftAnalyzerAgent:
         """Wrapper for setting values in shared memory"""
         shared_memory.set(key, value)
         return {"status": "success", "message": f"Value set for key: {key}"} 
+    def update_agent_status(self, status_info):
+        """Update agent status in shared memory"""
+        agent_type = self.agent.state.agent_type
+        status_key = f"{agent_type}_status"
+        
+        status_data = {
+            "status": status_info,
+            "timestamp": datetime.now().isoformat(),
+            "agent": agent_type
+        }
+        
+        shared_memory.set(status_key, status_data)
