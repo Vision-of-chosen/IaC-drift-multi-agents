@@ -1,0 +1,16 @@
+{
+  "drifts_detected": true,
+  "resources": [
+    {
+      "resource_type": "aws_security_group",
+      "resource_id": "sg-12345678",
+      "changes": [
+        {
+          "attribute": "ingress",
+          "current": [{"from_port": 22, "to_port": 22, "protocol": "tcp", "cidr_blocks": ["0.0.0.0/0"]}],
+          "expected": [{"from_port": 22, "to_port": 22, "protocol": "tcp", "cidr_blocks": ["10.0.0.0/8"]}]
+        }
+      ]
+    }
+  ]
+}

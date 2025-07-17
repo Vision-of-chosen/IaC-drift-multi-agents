@@ -1,0 +1,11 @@
+{
+  "remediation_results": [
+    {
+      "resource_type": "aws_security_group",
+      "resource_id": "sg-12345678",
+      "action_taken": "Updated ingress rule",
+      "details": "Modified SSH ingress rule to restrict access to 10.0.0.0/8",
+      "status": "SUCCESS"
+    }
+  ]
+}

@@ -27,6 +27,7 @@ from strands_tools import use_aws
 from datetime import datetime
 from useful_tools import cloudtrail_logs
 from useful_tools import cloudwatch_logs
+from useful_tools.terraform_tools import terraform_plan
 
 # Import our custom read_tfstate tool
 try:
@@ -82,9 +83,9 @@ class DetectAgent:
         """Create the detect agent instance"""
         # Create tools list based on availability of read_tfstate
         if read_tfstate:
-            tools = [use_aws, cloudtrail_logs, cloudwatch_logs, read_tfstate]
+            tools = [use_aws, cloudtrail_logs, cloudwatch_logs, read_tfstate, terraform_plan]
         else:
-            tools = [use_aws, cloudtrail_logs, cloudwatch_logs]
+            tools = [use_aws, cloudtrail_logs, cloudwatch_logs, terraform_plan]
         
         agent = Agent(
             model=self.model,
@@ -205,7 +206,7 @@ class DetectAgent:
         })
         
         return result
-        
+
     def update_agent_status(self, status_info):
         """Update agent status in shared memory"""
         agent_type = self.agent.state.agent_type

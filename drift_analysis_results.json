@@ -1,0 +1,11 @@
+{
+  "analysis_results": [
+    {
+      "resource_type": "aws_security_group",
+      "resource_id": "sg-12345678",
+      "severity": "HIGH",
+      "impact": "Security risk: SSH access (port 22) is open to the internet instead of being restricted to internal network.",
+      "recommendation": "Update the security group to restrict SSH access to the internal network CIDR range (10.0.0.0/8)."
+    }
+  ]
+}

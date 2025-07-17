@@ -18,15 +18,12 @@ from strands import Agent
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
 
-from strands_tools import use_aws
+from strands_tools import file_read, file_write, journal, calculator, use_aws
 from datetime import datetime
 # Import additional useful tools for comprehensive drift detection
 from useful_tools import cloudtrail_logs
 from useful_tools import cloudwatch_logs
-from useful_tools.terraform_tools import terraform_plan, terraform_apply, terraform_import
-from useful_tools.terraform_mcp_tool import terraform_run_command, terraform_run_checkov_scan
-from useful_tools.aws_documentation import aws_documentation_search
-from useful_tools.terraform_documentation import terraform_documentation_search
+
 
 from prompts import AgentPrompts
 from shared_memory import shared_memory
@@ -50,21 +47,13 @@ class OrchestrationAgent:
             description="Central coordinator for the Terraform Drift Detection & Remediation System",
             callback_handler=create_agent_callback_handler("OrchestrationAgent"),
             tools = [
-                # Core AWS and state tools
+                file_read,
+                file_write,
+                journal,
+                calculator,
                 use_aws,
-                cloudtrail_logs, 
-                cloudwatch_logs,
-                
-                # Terraform operational tools
-                terraform_plan,
-                terraform_apply,
-                terraform_import,
-                terraform_run_command,
-                terraform_run_checkov_scan,
-                
-                # Documentation and reference tools
-                aws_documentation_search,
-                terraform_documentation_search
+                cloudtrail_logs,
+                cloudwatch_logs
             ]
         )
         

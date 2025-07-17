@@ -150,11 +150,6 @@ class TerraformDriftChatInterface:
         """Generate a JSON report of drift detection results"""
         print("\n📊 Generating JSON Report...")
         
-        # Check if we have drift detection results
-        if not shared_memory.has_key("drift_detection_results"):
-            print("❌ No drift detection results found. Run a drift detection first.")
-            return
-            
         try:
             # Access the report agent
             report_agent = self.agents.get('report')
@@ -181,6 +176,16 @@ class TerraformDriftChatInterface:
             print(f"Risk Level: {scan_details.get('riskLevel')}")
             print(f"Total Drifts: {len(report.get('drifts', []))}")
             print("-" * 50)
+
+            try:
+                with open("report.json", "r") as f:
+                    report_content = f.read()
+                    print("\nReport JSON Content:")
+                    print("-" * 50)
+                    print(report_content)
+                    print("-" * 50)
+            except Exception as e:
+                print(f"⚠️ Could not read report.json file: {e}")
             
         except Exception as e:
             print(f"❌ Error generating report: {e}")
@@ -269,7 +274,7 @@ class TerraformDriftChatInterface:
             # Update workflow status
             shared_memory.set("workflow_status", "completed")
             shared_memory.set("completion_timestamp", datetime.now().isoformat())
-            
+
         except Exception as e:
             print(f"❌ Error processing request: {e}")
             import traceback
@@ -295,6 +300,7 @@ class TerraformDriftChatInterface:
         print("  remediate - Apply recommended fixes")
         print("  status - Show current system status")
         print("  memory - View shared memory contents")
+        print("  report - Generate JSON report")
         print("  help - Show this help")
         print("  exit - Exit the system")
         print("")

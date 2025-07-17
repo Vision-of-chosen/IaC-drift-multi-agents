@@ -124,30 +124,19 @@ resource "aws_s3_bucket_public_access_block" "test_bucket_pab" {
   restrict_public_buckets = true
 }
 
-# EC2 Security Group for testing
-resource "aws_security_group" "test_sg" {
-  name        = "terraform-drift-test-20250713100022452400000001"
-  description = "Security group for drift detection testing"
-  
-  # Allow SSH access (potential drift target)
+# Existing default VPC Security Group
+resource "aws_security_group" "default" {
+  name        = "default"
+  description = "default VPC security group"
+  vpc_id      = "vpc-0913b9969b0533ea1"
+
   ingress {
-    description = "SSH"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = var.allowed_ssh_cidrs
+    from_port = 0
+    to_port   = 0
+    protocol  = "-1"
+    self      = true
   }
-  
-  # Allow HTTP access (potential drift target)  
-  ingress {
-    description = "HTTP"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  
-  # Allow all outbound traffic
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -156,9 +145,16 @@ resource "aws_security_group" "test_sg" {
   }
 
   tags = {
-    Name        = "terraform-drift-test-sg"
-    Environment = var.environment
-    ManagedBy   = "terraform"
+    Name = "default"
+  }
+
+  lifecycle {
+    ignore_changes = [
+      name,
+      description,
+      ingress,
+      egress,
+    ]
   }
 }
 

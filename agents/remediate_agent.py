@@ -30,6 +30,12 @@ except ImportError:
     logger.warning("terraform_mcp_tool not available, some functionality will be limited")
     TERRAFORM_MCP_TOOLS_AVAILABLE = False
 
+from useful_tools.terraform_tools import (
+    terraform_plan,
+    terraform_apply,
+    terraform_import
+)
+
 from prompts import AgentPrompts
 from shared_memory import shared_memory
 from config import BEDROCK_REGION, TERRAFORM_DIR
@@ -56,7 +62,10 @@ class RemediateAgent:
                 terraform_run_command,
                 terraform_run_checkov_scan,
                 terraform_get_best_practices,
-                terraform_get_provider_docs
+                terraform_get_provider_docs,
+                terraform_plan,
+                terraform_apply,
+                terraform_import
             ]
         else:
             # Basic tools only

@@ -20,6 +20,8 @@ from strands_tools import use_aws, retrieve
 from datetime import datetime
 from useful_tools.aws_documentation import aws_documentation_search
 from useful_tools.terraform_documentation import terraform_documentation_search
+from useful_tools import cloudtrail_logs
+from useful_tools import cloudwatch_logs
 
 from prompts import AgentPrompts
 from shared_memory import shared_memory
@@ -44,7 +46,9 @@ class DriftAnalyzerAgent:
                 use_aws,
                 retrieve,
                 aws_documentation_search,
-                terraform_documentation_search
+                terraform_documentation_search,
+                cloudtrail_logs,
+                cloudwatch_logs
             ]
         )
         

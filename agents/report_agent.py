@@ -278,18 +278,31 @@ class ReportAgent:
         scan_id = shared_memory.get("scan_id", f"scan-{uuid.uuid4().hex[:6]}")
         if "scan_id" not in shared_memory.data:
             shared_memory.set("scan_id", scan_id)
+
+        # Get current timestamp for report
+        current_time = datetime.now().isoformat() + "Z"
             
+        # Get information form shared memory 
+        user_request = shared_memory.get("user_request", "")
+        workflow_status = shared_memory.get("workflow_status", "completed")
+
+        # Create report structure
         report = {
             "scanDetails": {
                 "id": scan_id,
                 "fileName": shared_memory.get("terraform_filename", "terraform-plan"),
-                "scanDate": datetime.now().isoformat() + "Z",
-                "status": "no_data",
+                "scanDate": current_time,
+                "status": workflow_status,
                 "totalResources": 0,
                 "driftCount": 0,
                 "riskLevel": "none"
             },
-            "drifts": []
+            "drifts": [],
+            "systemInfo": {
+                "lastRequest": user_request,
+                "reportGeneratedAt": current_time,
+                "message": "No drift detection results available. Run drift detection first to get detailed results."
+            }
         }
         return report
         

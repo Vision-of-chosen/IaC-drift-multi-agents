@@ -1,52 +1,76 @@
-# Terraform Drift Remediation Report
+# Security Group Drift Remediation Report
 
-## Summary of Changes
+## Summary
+- Drift detected in security group configuration
+- Attempted to update Terraform configuration to match current AWS state
+- Unable to run Terraform commands successfully
 
-This report outlines the changes made to address the drift detected in our AWS infrastructure managed by Terraform.
+## Changes Made
+1. Updated `main.tf` to include the existing default VPC security group:
+   ```hcl
+   resource "aws_security_group" "default" {
+     name        = "default"
+     description = "default VPC security group"
+     vpc_id      = "vpc-0913b9969b0533ea1"
 
-### 1. CloudWatch Log Group
+     ingress {
+       from_port = 0
+       to_port   = 0
+       protocol  = "-1"
+       self      = true
+     }
 
-- Updated the log group name to use a fixed suffix: `/aws/terraform-drift-test/s49q9z8j`
-- Set a default retention period of 14 days
-- Added tags for better resource management
+     egress {
+       from_port   = 0
+       to_port     = 0
+       protocol    = "-1"
+       cidr_blocks = ["0.0.0.0/0"]
+     }
 
-### 2. S3 Bucket
+     tags = {
+       Name = "default"
+     }
 
-- Updated the bucket name to `terraform-drift-test-s49q9z8j`
-- Enabled versioning
-- Added server-side encryption with AES256
-- Updated public access block settings
-- Added tags for better resource management
+     lifecycle {
+       ignore_changes = [
+         name,
+         description,
+         ingress,
+         egress,
+       ]
+     }
+   }
+   ```
+2. Removed the non-existent test security group from the configuration.
 
-### 3. IAM Role
+## Issues Encountered
+- Unable to run Terraform commands (init, plan, validate) successfully
+- No detailed error messages available from Terraform commands
 
-- Updated the role name to use a fixed suffix: `terraform-drift-test-role-s49q9z8j`
-- Expanded the IAM policy to include:
-  - S3 actions: GetObject, PutObject, and ListBucket
-  - CloudWatch Logs actions: CreateLogGroup, CreateLogStream, and PutLogEvents
-- Added tags for better resource management
+## Recommendations
+1. Manual review of Terraform configuration:
+   - Review `main.tf`, `variables.tf`, and any other relevant Terraform files
+   - Ensure all required providers are correctly specified
+   - Check for any syntax errors or misconfigurations
 
-### 4. Security Group
+2. Verify current AWS state:
+   - Use AWS CLI or AWS Console to check the current state of the security group
+   - Confirm that the security group settings match the intended configuration
 
-- Updated the security group name to `terraform-drift-test-20250713100022452400000001`
-- Maintained existing ingress and egress rules
-- Added tags for better resource management
+3. Manual remediation (if necessary):
+   - If Terraform cannot be used, consider updating the security group manually through AWS Console or CLI
+   - Ensure that any manual changes are documented and reflected in the Terraform configuration for future management
+
+4. Re-attempt Terraform operations:
+   - After manual review and potential fixes, try running Terraform init, plan, and apply again
+   - If successful, this will ensure that the Terraform state matches the actual AWS resources
+
+5. Consider using AWS Config or CloudFormation Drift Detection for ongoing monitoring of resource drift
 
 ## Next Steps
+1. Human operator to review this report and the Terraform configuration
+2. Verify the current state of the security group in AWS
+3. Decide on whether to proceed with manual remediation or further troubleshooting of Terraform issues
+4. Update the Terraform state to match the actual AWS resources once configuration issues are resolved
 
-1. Review the changes made in the `main.tf` file
-2. Run `terraform plan` to verify the changes and ensure no unexpected modifications
-3. If the plan looks good, run `terraform apply` to apply the changes
-4. After applying, run another drift detection to confirm all issues have been resolved
-5. Update any documentation or runbooks to reflect the new configuration
-6. Consider implementing regular automated drift detection to catch future discrepancies early
-
-## Best Practices Implemented
-
-- Used consistent naming conventions across resources
-- Added proper tagging to all resources for better management and cost allocation
-- Implemented encryption for S3 bucket
-- Updated IAM roles with least privilege access
-- Maintained security group rules to ensure proper network access control
-
-By implementing these changes, we have brought our Terraform-managed infrastructure back into alignment with our defined state, addressing the detected drift and improving our overall infrastructure management.
+Please note that manual intervention is required to complete the remediation process due to the encountered Terraform command issues.
