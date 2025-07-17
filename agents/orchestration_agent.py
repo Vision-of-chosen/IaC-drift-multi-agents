@@ -123,3 +123,28 @@ class OrchestrationAgent:
         }
         
         shared_memory.set(status_key, status_data)
+
+    def generate_report(self):
+        """Generate a JSON report using the ReportAgent"""
+        self.update_agent_status({
+            "action": "generating_report",
+            "timestamp": datetime.now().isoformat(),
+        })
+        
+        # Create a prompt for the ReportAgent
+        prompt = """
+        Generate a JSON report of the terraform drift detection and analysis results.
+        Format the report according to the required structure and save it to report.json.
+        """
+        
+        # Run the agent with the report generation prompt
+        result = self.agent.run(prompt)
+        
+        self.update_agent_status({
+            "action": "report_generated",
+            "timestamp": datetime.now().isoformat(),
+        })
+        
+        # Return the location of the saved report
+        report_file = shared_memory.get("drift_report_file", "report.json")
+        return f"Report generated and saved to {report_file}"

@@ -8,6 +8,7 @@ with the multi-agent system for drift detection and remediation.
 
 import logging
 import os
+import json
 from pathlib import Path
 from typing import Dict, Any
 from datetime import datetime
@@ -17,6 +18,7 @@ from strands.models.bedrock import BedrockModel
 
 from shared_memory import shared_memory
 from agents import OrchestrationAgent, DetectAgent, DriftAnalyzerAgent, RemediateAgent
+from agents.report_agent import ReportAgent
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,7 @@ def create_terraform_drift_system():
     detect_agent = DetectAgent(model)
     drift_analyzer_agent = DriftAnalyzerAgent(model)
     remediate_agent = RemediateAgent(model)
+    report_agent = ReportAgent(model)
     
     # Build the agent graph using GraphBuilder
     builder = GraphBuilder()
@@ -54,6 +57,7 @@ def create_terraform_drift_system():
     detect_node = builder.add_node(detect_agent.get_agent(), "detect")
     analyzer_node = builder.add_node(drift_analyzer_agent.get_agent(), "analyzer")
     remediate_node = builder.add_node(remediate_agent.get_agent(), "remediate")
+    report_node = builder.add_node(report_agent.get_agent(), "report")
     
     # Define the workflow edges - all agents connect directly to Orchestration Agent
     # Orchestration → DetectAgent
@@ -65,6 +69,9 @@ def create_terraform_drift_system():
     # Orchestration → RemediateAgent
     builder.add_edge(orchestration_node, remediate_node)
     
+    # Orchestration → ReportAgent
+    builder.add_edge(orchestration_node, report_node)
+    
     # Build the graph
     graph = builder.build()
     
@@ -72,7 +79,8 @@ def create_terraform_drift_system():
         'orchestration': orchestration_agent,
         'detect': detect_agent, 
         'analyzer': drift_analyzer_agent,
-        'remediate': remediate_agent
+        'remediate': remediate_agent,
+        'report': report_agent
     }
 
 
@@ -91,6 +99,7 @@ class TerraformDriftChatInterface:
         print("  • detect - Run drift detection")
         print("  • analyze - Analyze detected drift")
         print("  • remediate - Apply drift remediation")
+        print("  • report - Generate JSON drift report")
         print("  • status - Check system status")
         print("  • memory - View shared memory")
         print("  • help - Show this help")
@@ -122,6 +131,11 @@ class TerraformDriftChatInterface:
                     self.show_shared_memory()
                     continue
                 
+                # Report command to generate JSON report
+                if user_input.lower() == 'report':
+                    self.generate_report()
+                    continue
+                
                 # Process the request through the multi-agent system
                 self.process_request(user_input)
                 
@@ -132,6 +146,46 @@ class TerraformDriftChatInterface:
                 print(f"❌ Error: {e}")
                 logger.error(f"Error processing request: {e}")
     
+    def generate_report(self):
+        """Generate a JSON report of drift detection results"""
+        print("\n📊 Generating JSON Report...")
+        
+        # Check if we have drift detection results
+        if not shared_memory.has_key("drift_detection_results"):
+            print("❌ No drift detection results found. Run a drift detection first.")
+            return
+            
+        try:
+            # Access the report agent
+            report_agent = self.agents.get('report')
+            if not report_agent:
+                print("❌ Report agent not available.")
+                return
+                
+            # Generate the report
+            report = report_agent.generate_json_report("report.json")
+            
+            # Display confirmation
+            print(f"✅ Report generated and saved to report.json")
+            
+            # Show preview of the report structure
+            print("\nReport Preview:")
+            print("-" * 50)
+            scan_details = report.get("scanDetails", {})
+            print(f"Scan ID: {scan_details.get('id')}")
+            print(f"File: {scan_details.get('fileName')}")
+            print(f"Date: {scan_details.get('scanDate')}")
+            print(f"Status: {scan_details.get('status')}")
+            print(f"Total Resources: {scan_details.get('totalResources')}")
+            print(f"Drift Count: {scan_details.get('driftCount')}")
+            print(f"Risk Level: {scan_details.get('riskLevel')}")
+            print(f"Total Drifts: {len(report.get('drifts', []))}")
+            print("-" * 50)
+            
+        except Exception as e:
+            print(f"❌ Error generating report: {e}")
+            logger.error(f"Report generation error: {e}")
+
     def process_request(self, user_input: str):
         """Process user request through the multi-agent system"""
         print(f"\n🤖 Processing: {user_input}")

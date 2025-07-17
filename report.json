@@ -1,0 +1,121 @@
+{
+  "scanDetails": {
+    "id": "scan-001",
+    "fileName": "manual-security-group-analysis",
+    "scanDate": "2023-06-14T10:00:00Z",
+    "status": "completed",
+    "totalResources": 3,
+    "driftCount": 3,
+    "riskLevel": "medium"
+  },
+  "drifts": [
+    {
+      "id": "drift-001",
+      "resourceType": "aws_security_group",
+      "resourceName": "drift-detection-test-sg-fe2ab96e0d1949c8",
+      "riskLevel": "medium",
+      "beforeState": {
+        "name": "unknown",
+        "description": "unknown",
+        "ingressRules": "unknown",
+        "egressRules": "unknown"
+      },
+      "afterState": {
+        "name": "drift-detection-test-sg-fe2ab96e0d1949c8",
+        "description": "Security group with potentially drifted configuration",
+        "ingressRules": [
+          {
+            "fromPort": 80,
+            "toPort": 80,
+            "protocol": "tcp",
+            "cidrBlocks": ["0.0.0.0/0"]
+          },
+          {
+            "fromPort": 22,
+            "toPort": 22,
+            "protocol": "tcp",
+            "cidrBlocks": ["10.0.0.0/8"]
+          }
+        ],
+        "egressRules": [
+          {
+            "fromPort": 0,
+            "toPort": 0,
+            "protocol": "-1",
+            "cidrBlocks": ["0.0.0.0/0"]
+          }
+        ]
+      },
+      "aiExplanation": "This security group has a name suggesting it was created for drift detection testing. It allows inbound HTTP traffic from anywhere and SSH from a large internal network range. Outbound traffic is unrestricted. This configuration may not align with best practices for security.",
+      "aiRemediate": "1. Review if this security group is intended to be part of your infrastructure.\n2. If needed, update your Terraform configuration to include this security group with the correct rules.\n3. Consider restricting HTTP access to known IP ranges if possible.\n4. Narrow down the SSH access to more specific IP ranges or use a bastion host.\n5. Restrict outbound traffic to necessary protocols and destinations."
+    },
+    {
+      "id": "drift-002",
+      "resourceType": "aws_security_group",
+      "resourceName": "launch-wizard-1",
+      "riskLevel": "high",
+      "beforeState": {
+        "name": "unknown",
+        "description": "unknown",
+        "ingressRules": "unknown",
+        "egressRules": "unknown"
+      },
+      "afterState": {
+        "name": "launch-wizard-1",
+        "description": "Security group created by launch wizard, likely not managed by Terraform",
+        "ingressRules": [
+          {
+            "fromPort": 22,
+            "toPort": 22,
+            "protocol": "tcp",
+            "cidrBlocks": ["10.0.0.0/24"]
+          }
+        ],
+        "egressRules": [
+          {
+            "fromPort": 0,
+            "toPort": 0,
+            "protocol": "-1",
+            "cidrBlocks": ["0.0.0.0/0"]
+          }
+        ]
+      },
+      "aiExplanation": "This security group was likely created manually through the AWS console using a launch wizard. It allows SSH access from a specific internal network range and unrestricted outbound traffic. This group is probably not managed by Terraform, indicating significant drift.",
+      "aiRemediate": "1. Determine if this security group is necessary for your infrastructure.\n2. If needed, create a corresponding Terraform resource for this security group in your configuration.\n3. If not needed, plan to delete this security group after ensuring no resources depend on it.\n4. Review the SSH access rule and confirm if the CIDR block is appropriate.\n5. Consider restricting outbound traffic to necessary protocols and destinations."
+    },
+    {
+      "id": "drift-003",
+      "resourceType": "aws_security_group",
+      "resourceName": "default",
+      "riskLevel": "medium",
+      "beforeState": {
+        "name": "default",
+        "description": "default VPC security group",
+        "ingressRules": "allow no inbound traffic",
+        "egressRules": "allow all outbound traffic"
+      },
+      "afterState": {
+        "name": "default",
+        "description": "default VPC security group with modified rules",
+        "ingressRules": [
+          {
+            "fromPort": 0,
+            "toPort": 0,
+            "protocol": "-1",
+            "self": true
+          }
+        ],
+        "egressRules": [
+          {
+            "fromPort": 0,
+            "toPort": 0,
+            "protocol": "-1",
+            "cidrBlocks": ["0.0.0.0/0"]
+          }
+        ]
+      },
+      "aiExplanation": "The default security group has been modified to allow all inbound traffic from itself, which is not the typical default configuration. This could potentially create security vulnerabilities if not managed carefully.",
+      "aiRemediate": "1. Review your Terraform configuration for the default security group.\n2. If the current state is intended, update your Terraform code to reflect these rules.\n3. If not intended, modify your Terraform configuration to reset the default security group to its original state.\n4. Consider creating separate, more restrictive security groups for your resources instead of modifying the default group.\n5. Apply the updated Terraform configuration to remediate the drift."
+    }
+  ]
+}
