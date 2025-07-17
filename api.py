@@ -60,13 +60,6 @@ app = FastAPI(
     - WebSocket streaming for real-time chat interactions
     - Multi-agent orchestration with intelligent routing
     - Session-based conversation management
-    - Terraform file upload and plan execution
-    
-    Terraform File Upload:
-    - POST /upload-terraform to upload .tf files
-    - Automatically clears existing terraform files
-    - Runs terraform plan using MCP tools
-    - Returns plan results and validation
     
     WebSocket Usage:
     - Connect to /ws/chat/{session_id} for streaming chat
@@ -134,19 +127,6 @@ class TerraformUploadResponse(BaseModel):
     message: str
     filename: str
     terraform_plan_result: Dict[str, Any]
-    success: bool
-    timestamp: datetime
-
-
-class AWSCredentialsRequest(BaseModel):
-    aws_access_key_id: str = Field(..., description="AWS Access Key ID")
-    aws_secret_access_key: str = Field(..., description="AWS Secret Access Key")
-    aws_region: str = Field(..., description="AWS Region (e.g., ap-southeast-2)")
-
-
-class AWSCredentialsResponse(BaseModel):
-    message: str
-    aws_region: str
     success: bool
     timestamp: datetime
 
@@ -601,8 +581,6 @@ async def root():
             "websocket_chat": "/ws/chat/{session_id}",
             "rest_chat": "/chat",
             "upload_terraform": "/upload-terraform",
-            "configure_aws": "/configure-aws",
-            "aws_status": "/aws-status",
             "test_client": "/test-client"
         }
     }
@@ -807,113 +785,6 @@ async def upload_terraform_file(file: UploadFile = File(...)):
         raise HTTPException(
             status_code=500, 
             detail=f"Failed to upload and process terraform file: {str(e)}"
-        )
-
-
-@app.post("/configure-aws", response_model=AWSCredentialsResponse, summary="Configure AWS Credentials")
-async def configure_aws_credentials(request: AWSCredentialsRequest):
-    """
-    Configure AWS credentials for the drift detection system
-    
-    This endpoint:
-    1. Validates the provided AWS credentials format
-    2. Sets them as environment variables for the current session
-    3. Updates shared memory with the credentials (access key and region only for security)
-    4. Allows the terraform and AWS tools to use these credentials
-    
-    The credentials are set as:
-    - export AWS_ACCESS_KEY_ID=<provided_access_key>
-    - export AWS_SECRET_ACCESS_KEY=<provided_secret_key>
-    - export AWS_REGION=<provided_region>
-    """
-    try:
-        logger.info(f"Configuring AWS credentials for region: {request.aws_region}")
-        
-        # Validate AWS credentials format
-        if not request.aws_access_key_id.startswith('AKIA'):
-            logger.warning("AWS Access Key ID should typically start with 'AKIA'")
-        
-        if len(request.aws_access_key_id) != 20:
-            logger.warning("AWS Access Key ID should typically be 20 characters long")
-            
-        if len(request.aws_secret_access_key) != 40:
-            logger.warning("AWS Secret Access Key should typically be 40 characters long")
-        
-        # Set environment variables
-        os.environ['AWS_ACCESS_KEY_ID'] = request.aws_access_key_id
-        os.environ['AWS_SECRET_ACCESS_KEY'] = request.aws_secret_access_key
-        os.environ['AWS_REGION'] = request.aws_region
-        
-        # Also set alternative environment variable names that some tools use
-        os.environ['AWS_DEFAULT_REGION'] = request.aws_region
-        
-        # Update shared memory with non-sensitive information
-        shared_memory.set("aws_access_key_id", request.aws_access_key_id)  # This is not highly sensitive
-        shared_memory.set("aws_region", request.aws_region)
-        shared_memory.set("aws_credentials_configured", True)
-        shared_memory.set("aws_credentials_timestamp", datetime.now().isoformat())
-        
-        logger.info(f"AWS credentials configured successfully for region: {request.aws_region}")
-        logger.info(f"Environment variables set: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_DEFAULT_REGION")
-        
-        return AWSCredentialsResponse(
-            message=f"AWS credentials configured successfully for region {request.aws_region}. Environment variables have been set and are ready for use by the drift detection system.",
-            aws_region=request.aws_region,
-            success=True,
-            timestamp=datetime.now()
-        )
-        
-    except Exception as e:
-        logger.error(f"Error configuring AWS credentials: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to configure AWS credentials: {str(e)}"
-        )
-
-
-@app.get("/aws-status", summary="Get AWS Configuration Status")
-async def get_aws_status():
-    """
-    Get the current AWS configuration status
-    
-    Returns information about:
-    - Whether AWS credentials are configured
-    - The configured AWS region
-    - When credentials were last configured
-    - Environment variable status
-    """
-    try:
-        aws_configured = shared_memory.get("aws_credentials_configured", False)
-        aws_region = shared_memory.get("aws_region", None)
-        aws_access_key = shared_memory.get("aws_access_key_id", None)
-        config_timestamp = shared_memory.get("aws_credentials_timestamp", None)
-        
-        # Check environment variables
-        env_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-        env_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-        env_region = os.environ.get('AWS_REGION')
-        env_default_region = os.environ.get('AWS_DEFAULT_REGION')
-        
-        return {
-            "aws_credentials_configured": aws_configured,
-            "aws_region": aws_region,
-            "aws_access_key_id": aws_access_key[:8] + "..." if aws_access_key else None,  # Show only first 8 chars for security
-            "configuration_timestamp": config_timestamp,
-            "environment_variables": {
-                "AWS_ACCESS_KEY_ID": "SET" if env_access_key else "NOT_SET",
-                "AWS_SECRET_ACCESS_KEY": "SET" if env_secret_key else "NOT_SET", 
-                "AWS_REGION": env_region,
-                "AWS_DEFAULT_REGION": env_default_region
-            },
-            "ready_for_drift_detection": all([env_access_key, env_secret_key, env_region]),
-            "timestamp": datetime.now()
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting AWS status: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to get AWS status: {str(e)}"
         )
 
 
