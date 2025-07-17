@@ -10,6 +10,8 @@ handler patterns from the multi-agentic system notebook.
 import logging
 import json
 import time
+import asyncio
+import threading
 from typing import Dict, Any, Optional, List, Callable
 from datetime import datetime
 
@@ -41,12 +43,208 @@ class PermissionManager:
         self.pending_approvals = {}
         self.denied_tools = set()  # Track globally denied tools
         self.processed_tool_ids = set()  # Track already processed tool IDs
+        self.approval_callback = None  # Callback for sending approval requests to frontend
+        self.current_permission_request = None  # Store current permission request for REST API
         
-    def get_human_approval(self, function_name: str, parameters: dict, agent_name: str = "Agent") -> bool:
+    def set_approval_callback(self, callback: Callable):
+        """Set the callback function for sending approval requests to frontend"""
+        self.approval_callback = callback
+
+    def get_human_approval_rest(self, function_name: str, parameters: dict, agent_name: str = "Agent", session_id: str = None) -> bool:
         """
-        Prompt the human operator for approval before executing a tool.
+        Request approval from the human operator through the REST API.
+        Stores the permission request and returns False to pause execution.
+        The actual approval will be processed when the user responds.
+        """
+        # Check if this tool has been globally denied
+        if function_name in self.denied_tools:
+            logger.info(f"🚫 Tool '{function_name}' has been globally denied - blocking automatically")
+            return False
+            
+        # Generate unique approval request ID
+        request_id = f"approval_{int(time.time() * 1000)}_{function_name}"
+        
+        # Create approval request data
+        approval_request = {
+            "request_id": request_id,
+            "agent_name": agent_name,
+            "function_name": function_name,
+            "parameters": parameters,
+            "timestamp": datetime.now().isoformat(),
+            "session_id": session_id
+        }
+        
+        # Store the current permission request for REST API access
+        self.current_permission_request = approval_request
+        
+        # Store in pending approvals with a threading event for synchronization
+        self.pending_approvals[request_id] = {
+            "approved": None,
+            "response": None,
+            "event": threading.Event(),
+            "data": approval_request
+        }
+        
+        logger.info(f"🔐 Permission request created for {function_name} (REST API mode)")
+        
+        # Wait for response with timeout (60 seconds)
+        try:
+            response_received = self.pending_approvals[request_id]["event"].wait(timeout=60.0)
+            
+            if response_received:
+                # Get the approval result
+                approval_data = self.pending_approvals[request_id]
+                approved = approval_data["approved"]
+                response = approval_data["response"]
+                
+                # Clean up
+                if request_id in self.pending_approvals:
+                    del self.pending_approvals[request_id]
+                
+                # Clear current request
+                if self.current_permission_request and self.current_permission_request.get("request_id") == request_id:
+                    self.current_permission_request = None
+                
+                # Handle different approval responses
+                if response in ("always", "a"):
+                    logger.info("✅ Request approved and added to auto-approve list")
+                    self.auto_approve_tools.append(function_name)
+                    return True
+                elif response in ("never", "deny-all", "da", "block"):
+                    logger.info("❌ Request denied and tool blocked for all future attempts")
+                    self.denied_tools.add(function_name)
+                    return False
+                elif approved:
+                    logger.info("✅ Request approved")
+                    return True
+                else:
+                    logger.info("❌ Request denied")
+                    return False
+                    
+            else:
+                logger.warning(f"⏰ Permission request for {function_name} timed out - denying")
+                if request_id in self.pending_approvals:
+                    del self.pending_approvals[request_id]
+                if self.current_permission_request and self.current_permission_request.get("request_id") == request_id:
+                    self.current_permission_request = None
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error waiting for approval: {e}")
+            if request_id in self.pending_approvals:
+                del self.pending_approvals[request_id]
+            if self.current_permission_request and self.current_permission_request.get("request_id") == request_id:
+                self.current_permission_request = None
+            return False
+
+    async def get_human_approval_async(self, function_name: str, parameters: dict, agent_name: str = "Agent", session_id: str = None) -> bool:
+        """
+        Request approval from the human operator through the chat API.
         Returns True if approved, False otherwise.
         """
+        # Check if this tool has been globally denied
+        if function_name in self.denied_tools:
+            logger.info(f"🚫 Tool '{function_name}' has been globally denied - blocking automatically")
+            return False
+            
+        # Generate unique approval request ID
+        request_id = f"approval_{int(time.time() * 1000)}_{function_name}"
+        
+        # Create approval request data
+        approval_request = {
+            "request_id": request_id,
+            "agent_name": agent_name,
+            "function_name": function_name,
+            "parameters": parameters,
+            "timestamp": datetime.now().isoformat(),
+            "session_id": session_id
+        }
+        
+        # Store pending approval
+        self.pending_approvals[request_id] = {
+            "approved": None,
+            "response": None,
+            "event": asyncio.Event()
+        }
+        
+        logger.info(f"🔐 Requesting approval for {function_name} from frontend...")
+        
+        # Send approval request to frontend through callback
+        if self.approval_callback:
+            try:
+                await self.approval_callback(approval_request)
+            except Exception as e:
+                logger.error(f"Error sending approval request: {e}")
+                # Clean up and deny if we can't send the request
+                del self.pending_approvals[request_id]
+                return False
+        else:
+            logger.error("No approval callback set - denying request")
+            del self.pending_approvals[request_id]
+            return False
+        
+        # Wait for response with timeout (60 seconds)
+        try:
+            await asyncio.wait_for(self.pending_approvals[request_id]["event"].wait(), timeout=60.0)
+            
+            # Get the approval result
+            approval_data = self.pending_approvals[request_id]
+            approved = approval_data["approved"]
+            response = approval_data["response"]
+            
+            # Clean up
+            del self.pending_approvals[request_id]
+            
+            # Handle different approval responses
+            if response in ("always", "a"):
+                logger.info("✅ Request approved and added to auto-approve list")
+                self.auto_approve_tools.append(function_name)
+                return True
+            elif response in ("never", "deny-all", "da", "block"):
+                logger.info("❌ Request denied and tool blocked for all future attempts")
+                self.denied_tools.add(function_name)
+                return False
+            elif approved:
+                logger.info("✅ Request approved")
+                return True
+            else:
+                logger.info("❌ Request denied")
+                return False
+                
+        except asyncio.TimeoutError:
+            logger.warning(f"⏰ Approval request for {function_name} timed out - denying")
+            if request_id in self.pending_approvals:
+                del self.pending_approvals[request_id]
+            return False
+        except Exception as e:
+            logger.error(f"Error waiting for approval: {e}")
+            if request_id in self.pending_approvals:
+                del self.pending_approvals[request_id]
+            return False
+
+    def get_human_approval(self, function_name: str, parameters: dict, agent_name: str = "Agent") -> bool:
+        """
+        Main approval method - now uses REST API approach by default.
+        Falls back to console input if no callback is available.
+        """
+        # For REST API mode, use the synchronous REST approach
+        session_id = self.get_current_session_id()
+        if session_id:
+            return self.get_human_approval_rest(function_name, parameters, agent_name, session_id)
+        
+        # Fall back to console input
+        return self._get_console_approval(function_name, parameters, agent_name)
+    
+    def get_current_session_id(self) -> Optional[str]:
+        """Get the current session ID from shared memory"""
+        try:
+            from shared_memory import shared_memory
+            return shared_memory.get("current_session_id")
+        except:
+            return None
+    
+    def _get_console_approval(self, function_name: str, parameters: dict, agent_name: str = "Agent") -> bool:
+        """Original console-based approval method"""
         # Check if this tool has been globally denied
         if function_name in self.denied_tools:
             print(f"🚫 Tool '{function_name}' has been globally denied - blocking automatically")
@@ -93,6 +291,41 @@ class PermissionManager:
             print("❌ Request denied")
             return False
 
+    def handle_approval_response(self, request_id: str, approved: bool, response: str = None) -> bool:
+        """
+        Handle approval response from frontend
+        
+        Args:
+            request_id: The approval request ID
+            approved: Whether the request was approved
+            response: The specific response type (yes/no/always/never/deny-all)
+            
+        Returns:
+            True if the response was processed, False if request_id not found
+        """
+        if request_id not in self.pending_approvals:
+            logger.warning(f"Received approval response for unknown request: {request_id}")
+            return False
+        
+        # Update the pending approval
+        approval_data = self.pending_approvals[request_id]
+        approval_data["approved"] = approved
+        approval_data["response"] = response
+        
+        # Signal that we have a response (works for both threading.Event and asyncio.Event)
+        approval_data["event"].set()
+        
+        logger.info(f"📬 Processed approval response for {request_id}: {approved} ({response})")
+        return True
+
+    def get_current_permission_request(self) -> Optional[Dict[str, Any]]:
+        """Get the current permission request for REST API"""
+        return self.current_permission_request
+
+    def clear_current_permission_request(self):
+        """Clear the current permission request"""
+        self.current_permission_request = None
+
     def needs_approval(self, function_name: str) -> bool:
         """Check if a function needs user approval"""
         # If tool is globally denied, it still "needs approval" so we can block it
@@ -108,11 +341,23 @@ class PermissionManager:
     def clear_denied_tools(self) -> None:
         """Clear the list of globally denied tools"""
         self.denied_tools.clear()
-        print("✅ Cleared all globally denied tools")
+        logger.info("✅ Cleared all globally denied tools")
         
     def get_denied_tools(self) -> set:
         """Get the set of globally denied tools"""
         return self.denied_tools.copy()
+    
+    def get_pending_approvals(self) -> Dict[str, Dict[str, Any]]:
+        """Get information about pending approvals"""
+        pending_info = {}
+        for request_id, data in self.pending_approvals.items():
+            pending_info[request_id] = {
+                "approved": data["approved"],
+                "response": data["response"],
+                "waiting": data["approved"] is None,
+                "data": data.get("data", {})  # Include the full request data
+            }
+        return pending_info
 
 # Global permission manager instance
 permission_manager = PermissionManager()
@@ -173,8 +418,9 @@ def permission_based_callback_handler(**kwargs):
             # Check if this tool needs approval
             if permission_manager.needs_approval(tool_name):
                 agent_name = kwargs.get('agent_name', 'Agent')
+                session_id = kwargs.get('session_id')  # Get session_id from kwargs
                 
-                # Ask for human approval
+                # Use the REST API approval method
                 approved = permission_manager.get_human_approval(
                     function_name=tool_name,
                     parameters=tool_input,
@@ -245,14 +491,16 @@ def permission_based_callback_handler(**kwargs):
         # Log any other events we might have missed
         logger.debug(f"❓ OTHER EVENT: {kwargs}")
 
-def create_agent_callback_handler(agent_name: str) -> Callable:
+def create_agent_callback_handler(agent_name: str, session_id: str = None) -> Callable:
     """
     Create a callback handler specific to an agent.
-    This adds the agent name context to the permission requests.
+    This adds the agent name and session_id context to the permission requests.
     """
     def agent_specific_callback(**kwargs):
-        # Add agent name to kwargs for context
+        # Add agent name and session_id to kwargs for context
         kwargs['agent_name'] = agent_name
+        if session_id:
+            kwargs['session_id'] = session_id
         return permission_based_callback_handler(**kwargs)
     
     return agent_specific_callback
@@ -283,7 +531,8 @@ def get_permission_status() -> Dict[str, Any]:
         "require_approval_tools": permission_manager.require_approval_tools,
         "denied_tools": list(permission_manager.denied_tools),
         "pending_approvals": len(permission_manager.pending_approvals),
-        "processed_tool_ids": len(permission_manager.processed_tool_ids)
+        "processed_tool_ids": len(permission_manager.processed_tool_ids),
+        "current_permission_request": permission_manager.get_current_permission_request()
     }
 
 def reset_permission_manager() -> None:
