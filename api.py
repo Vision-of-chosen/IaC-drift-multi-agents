@@ -17,14 +17,17 @@ import sys
 from typing import Dict, Any, Optional
 from datetime import datetime
 import uuid
-
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+import glob
+from fastapi import FastAPI, HTTPException, BackgroundTasks, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 import uvicorn
 import asyncio
 import json
+import zipfile
+import tempfile
+import shutil
 
 # Add tools to path
 sys.path.append("tools/src")
@@ -35,6 +38,9 @@ from agents import OrchestrationAgent, DetectAgent, DriftAnalyzerAgent, Remediat
 from shared_memory import shared_memory
 from config import BEDROCK_MODEL_ID, BEDROCK_REGION, TERRAFORM_DIR
 from permission_handlers import permission_manager
+
+from useful_tools.terraform_mcp_tool import terraform_run_command
+from useful_tools.terraform_tools import terraform_plan, terraform_apply
 
 # Configure logging
 logging.basicConfig(
@@ -75,6 +81,7 @@ class TerraformUploadResponse(BaseModel):
     filename: str
     extracted_files: list[str] = Field(default_factory=list, description="List of .tf files extracted from the upload")
     terraform_plan_result: Dict[str, Any]
+    terraform_apply_result: Dict[str, Any]
     success: bool
     timestamp: datetime
 
@@ -959,26 +966,31 @@ async def upload_terraform_file(file: UploadFile = File(...)):
         
         # First, try to initialize terraform if needed
         logger.info("Initializing terraform...")
-        init_result = terraform_run_command(
-            command="init",
-            working_directory=terraform_dir
-        )
+        # init_result = terraform_run_command(
+        #     command="init",
+        #     working_directory=terraform_dir
+        # )
         
-        if not init_result.get("success", False):
-            logger.warning(f"Terraform init failed: {init_result.get('output', 'Unknown error')}")
+        # if not init_result.get("success", False):
+        #     logger.warning(f"Terraform init failed: {init_result.get('output', 'Unknown error')}")
             # Continue anyway, as some configurations might not need init
         
         # Use terraform_run_command with ExecuteTerraformCommand from awblab MCP
         logger.info("Running terraform plan using ExecuteTerraformCommand...")
-        plan_result = terraform_run_command(
-            command="plan",
-            working_directory=terraform_dir
+        plan_result = terraform_plan(
+            
+            terraform_dir=terraform_dir
+        )
+        apply_result = terraform_apply(
+            terraform_dir=terraform_dir,
+            auto_approve=True
         )
         
         # Update shared memory with the upload results
         shared_memory.set("last_uploaded_file", file.filename)
         shared_memory.set("extracted_terraform_files", extracted_files)
         shared_memory.set("terraform_plan_result", plan_result)
+        shared_memory.set("terraform_apply_result", apply_result)
         shared_memory.set("terraform_directory", terraform_dir)
         
         success = plan_result.get("success", False)
@@ -998,6 +1010,7 @@ async def upload_terraform_file(file: UploadFile = File(...)):
             filename=file.filename,
             extracted_files=extracted_files,
             terraform_plan_result=plan_result,
+            terraform_apply_result=apply_result,
             success=success,
             timestamp=datetime.now()
         )
