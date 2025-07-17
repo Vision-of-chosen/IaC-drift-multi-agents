@@ -33,16 +33,17 @@ from permission_handlers import create_agent_callback_handler
 class OrchestrationAgent:
     """Central coordinator for the multi-agent system"""
     
-    def __init__(self, model: BedrockModel):
+    def __init__(self, model: BedrockModel, prompts_class=None):
         self.model = model
         self.region = os.environ.get("AWS_REGION", BEDROCK_REGION)
+        self.prompts_class = prompts_class or AgentPrompts
         self.agent = self._create_agent()
     
     def _create_agent(self) -> Agent:
         """Create the orchestration agent instance"""
         agent = Agent(
             model=self.model,
-            system_prompt=AgentPrompts.get_prompt("orchestration"),
+            system_prompt=self.prompts_class.get_prompt("orchestration"),
             name="OrchestrationAgent",
             description="Central coordinator for the Terraform Drift Detection & Remediation System",
             callback_handler=create_agent_callback_handler("OrchestrationAgent"),

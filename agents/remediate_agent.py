@@ -43,8 +43,9 @@ from permission_handlers import create_agent_callback_handler
 class RemediateAgent:
     """Specialist in automated Terraform infrastructure remediation"""
     
-    def __init__(self, model: BedrockModel):
+    def __init__(self, model: BedrockModel, prompts_class=None):
         self.model = model
+        self.prompts_class = prompts_class or AgentPrompts
         self.terraform_dir = TERRAFORM_DIR
         self.agent = self._create_agent()
         
@@ -78,7 +79,7 @@ class RemediateAgent:
         
         agent = Agent(
             model=self.model,
-            system_prompt=AgentPrompts.get_prompt("remediate"),
+            system_prompt=self.prompts_class.get_prompt("remediate"),
             name="RemediateAgent",
             description="Specialist in automated Terraform infrastructure remediation using AWS best practices",
             callback_handler=create_agent_callback_handler("RemediateAgent"),

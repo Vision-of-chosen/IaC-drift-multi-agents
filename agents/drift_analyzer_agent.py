@@ -30,15 +30,16 @@ from permission_handlers import create_agent_callback_handler
 class DriftAnalyzerAgent:
     """Specialist in analyzing and assessing infrastructure drift impacts"""
     
-    def __init__(self, model: BedrockModel):
+    def __init__(self, model: BedrockModel, prompts_class=None):
         self.model = model
+        self.prompts_class = prompts_class or AgentPrompts
         self.agent = self._create_agent()
         
     def _create_agent(self) -> Agent:
         """Create the drift analyzer agent instance"""
         agent = Agent(
             model=self.model,
-            system_prompt=AgentPrompts.get_prompt("analyzer"),
+            system_prompt=self.prompts_class.get_prompt("analyzer"),
             name="DriftAnalyzerAgent",
             description="Specialist in analyzing drift severity and business impact",
             callback_handler=create_agent_callback_handler("DriftAnalyzerAgent"),

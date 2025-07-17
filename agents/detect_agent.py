@@ -74,9 +74,10 @@ from permission_handlers import create_agent_callback_handler
 class DetectAgent:
     """Specialist in detecting Terraform infrastructure drift"""
     
-    def __init__(self, model: BedrockModel):
+    def __init__(self, model: BedrockModel, prompts_class=None):
         self.model = model
         self.region = os.environ.get("AWS_REGION", BEDROCK_REGION)
+        self.prompts_class = prompts_class or AgentPrompts
         self.agent = self._create_agent()
     
     def _create_agent(self) -> Agent:
@@ -89,7 +90,7 @@ class DetectAgent:
         
         agent = Agent(
             model=self.model,
-            system_prompt=AgentPrompts.get_prompt("detect"),
+            system_prompt=self.prompts_class.get_prompt("detect"),
             name="DetectAgent",
             description="Specialist in detecting Terraform infrastructure drift by comparing state files with actual AWS resources",
             tools=tools,

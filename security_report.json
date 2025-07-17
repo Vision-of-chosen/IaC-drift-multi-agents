@@ -1,0 +1,46 @@
+{
+  "securityScanDetails": {
+    "scanId": "iam-drift-001",
+    "fileName": "iam-drift-scan-2025-07-12",
+    "scanDate": "2025-07-12T00:00:00Z",
+    "status": "completed",
+    "totalSecurityResources": 2,
+    "criticalDriftCount": 1,
+    "complianceStatus": "non-compliant"
+  },
+  "securityDrifts": [
+    {
+      "driftId": "sec-drift-001",
+      "resourceType": "aws_iam_user",
+      "resourceName": "dat_cli",
+      "securityRiskLevel": "critical",
+      "complianceViolations": ["CIS-1.16", "NIST-CSF-PR.AC-4"],
+      "beforeState": {
+        "user": "non-existent"
+      },
+      "afterState": {
+        "user": "dat_cli",
+        "creation_date": "2025-07-10",
+        "attached_policy": "AdministratorAccess"
+      },
+      "aiSecurityExplanation": "A new IAM user 'dat_cli' was created with AdministratorAccess policy, which grants full access to all AWS services and resources. This violates the principle of least privilege and poses a significant security risk. If these credentials are compromised, an attacker would have unrestricted access to the entire AWS account.",
+      "aiSecurityRemediation": "1. Immediately revoke the AdministratorAccess policy from the 'dat_cli' user.\n2. Audit the actions performed by this user since creation.\n3. Implement least privilege by granting only necessary permissions.\n4. Enable and review CloudTrail logs for unauthorized IAM changes.\n5. Implement strong password policies and enforce MFA for all IAM users.\n6. Consider using temporary security credentials instead of long-term access keys."
+    },
+    {
+      "driftId": "sec-drift-002",
+      "resourceType": "aws_iam_user",
+      "resourceName": "EC2_Management",
+      "securityRiskLevel": "medium",
+      "complianceViolations": ["CIS-1.1"],
+      "beforeState": {
+        "user": "non-existent"
+      },
+      "afterState": {
+        "user": "EC2_Management",
+        "creation_date": "2025-07-12"
+      },
+      "aiSecurityExplanation": "A new IAM user 'EC2_Management' was created. While creating task-specific users is generally a good practice, the permissions assigned to this user are unknown due to incomplete information. This creates uncertainty about the security posture and potential risks associated with this user.",
+      "aiSecurityRemediation": "1. Review and document the intended purpose of the 'EC2_Management' user.\n2. Audit the permissions granted to this user to ensure they align with the principle of least privilege.\n3. If EC2-specific permissions are required, consider using AWS-managed policies like 'AmazonEC2FullAccess' instead of custom policies, unless absolutely necessary.\n4. Implement a formal change management process for IAM user creation and permission assignments.\n5. Regularly review and rotate access keys for all IAM users."
+    }
+  ]
+}

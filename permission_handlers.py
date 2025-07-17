@@ -204,26 +204,32 @@ def permission_based_callback_handler(**kwargs):
     
     # === LIFECYCLE EVENTS ===
     elif kwargs.get("init_event_loop", False):
-        logger.info("🔄 Event loop initialized")
+        # logger.info("🔄 Event loop initialized")
+        pass
         
     elif kwargs.get("start_event_loop", False):
-        logger.info("▶️ Event loop cycle starting")
+        # logger.info("▶️ Event loop cycle starting")
+        pass
         
     elif kwargs.get("start", False):
-        logger.info("📝 New cycle started")
+        # logger.info("📝 New cycle started")
+        pass
         
     elif kwargs.get("complete", False):
-        logger.info("✅ Cycle completed")
+        # logger.info("✅ Cycle completed")
+        pass
         
     elif kwargs.get("force_stop", False):
         reason = kwargs.get("force_stop_reason", "unknown reason")
-        logger.info(f"🛑 Event loop force-stopped: {reason}")
+        # logger.info(f"🛑 Event loop force-stopped: {reason}")
+        pass
     
     # === MESSAGE EVENTS ===
     elif "message" in kwargs:
         message = kwargs["message"]
         role = message.get("role", "unknown")
-        logger.info(f"📬 New message created: {role}")
+        # logger.info(f"📬 New message created: {role}")
+        pass
     
     # === ERROR EVENTS ===
     elif "error" in kwargs:

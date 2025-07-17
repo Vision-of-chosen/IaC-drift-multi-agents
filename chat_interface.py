@@ -36,18 +36,18 @@ def create_bedrock_model() -> BedrockModel:
     )
 
 
-def create_terraform_drift_system():
+def create_terraform_drift_system(prompts_class=None):
     """Create the complete multi-agent Terraform drift system"""
     
     # Create model
     model = create_bedrock_model()
     
     # Create individual agents
-    orchestration_agent = OrchestrationAgent(model)
-    detect_agent = DetectAgent(model)
-    drift_analyzer_agent = DriftAnalyzerAgent(model)
-    remediate_agent = RemediateAgent(model)
-    report_agent = ReportAgent(model)
+    orchestration_agent = OrchestrationAgent(model, prompts_class)
+    detect_agent = DetectAgent(model, prompts_class)
+    drift_analyzer_agent = DriftAnalyzerAgent(model, prompts_class)
+    remediate_agent = RemediateAgent(model, prompts_class)
+    report_agent = ReportAgent(model, prompts_class)
     
     # Build the agent graph using GraphBuilder
     builder = GraphBuilder()
@@ -87,13 +87,20 @@ def create_terraform_drift_system():
 class TerraformDriftChatInterface:
     """Terminal-based chat interface for the drift detection system"""
     
-    def __init__(self):
-        self.graph, self.agents = create_terraform_drift_system()
+    def __init__(self, prompts_class=None):
+        self.prompts_class = prompts_class
+        print("Prompts class:", prompts_class)
+        self.graph, self.agents = create_terraform_drift_system(prompts_class)
         self._print_welcome()
     
     def _print_welcome(self):
         """Print welcome message and available commands"""
         print("🚀 Terraform Drift Detection & Remediation System Initialized")
+        if self.prompts_class:
+            prompt_class_name = self.prompts_class.__name__
+            print(f"📋 Using Specialized Prompts: {prompt_class_name}")
+        else:
+            print("📋 Using Standard Prompts: AgentPrompts")
         print("=" * 60)
         print("Available Commands:")
         print("  • detect - Run drift detection")
@@ -214,7 +221,7 @@ class TerraformDriftChatInterface:
             shared_memory.set("request_history", request_history[-5:])  # Keep last 5 requests
             
             # Execute the graph with the user input
-            result = self.graph.execute(user_input)
+            result = self.graph(user_input)
             
             print("\n✅ System Response:")
             print("-" * 50)
