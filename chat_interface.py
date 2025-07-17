@@ -17,8 +17,7 @@ from strands.multiagent.graph import GraphBuilder
 from strands.models.bedrock import BedrockModel
 
 from shared_memory import shared_memory
-from agents import OrchestrationAgent, DetectAgent, DriftAnalyzerAgent, RemediateAgent
-from agents.report_agent import ReportAgent
+from agents import OrchestrationAgent, DetectAgent, DriftAnalyzerAgent, RemediateAgent, ReportAgent
 
 logger = logging.getLogger(__name__)
 

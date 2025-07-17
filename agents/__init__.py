@@ -10,10 +10,12 @@ from .orchestration_agent import OrchestrationAgent
 from .detect_agent import DetectAgent
 from .drift_analyzer_agent import DriftAnalyzerAgent
 from .remediate_agent import RemediateAgent
+from .report_agent import ReportAgent
 
 __all__ = [
     'OrchestrationAgent',
     'DetectAgent', 
     'DriftAnalyzerAgent',
-    'RemediateAgent'
+    'RemediateAgent',
+    'ReportAgent'
 ] 
