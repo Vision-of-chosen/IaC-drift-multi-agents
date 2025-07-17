@@ -6,7 +6,6 @@ This module provides a web-based API interface that coordinates the multi-agent
 system with step-by-step user interaction between each agent execution.
 
 Architecture:
-- Step-by-step agent coordination with user approval
 - RESTful API endpoints for each workflow step
 - Session management for workflow state
 - Real-time progress updates
@@ -18,10 +17,10 @@ import sys
 from typing import Dict, Any, Optional
 from datetime import datetime
 import uuid
-
-from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
+import glob
+from fastapi import FastAPI, HTTPException, BackgroundTasks, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 import uvicorn
 import asyncio
@@ -32,11 +31,13 @@ sys.path.append("tools/src")
 
 from strands.models.bedrock import BedrockModel
 from strands.multiagent.graph import GraphBuilder
-from agents import OrchestrationAgent, DetectAgent, DriftAnalyzerAgent, RemediateAgent
+from agents import OrchestrationAgent, DetectAgent, DriftAnalyzerAgent, RemediateAgent, ReportAgent
 from shared_memory import shared_memory
 from config import BEDROCK_MODEL_ID, BEDROCK_REGION, TERRAFORM_DIR
 from permission_handlers import permission_manager
 
+from terraform_mcp_tool import terraform_run_command
+from terraform_tools import terraform_plan
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -52,19 +53,9 @@ app = FastAPI(
     
     Features:
     - Traditional REST API endpoints for one-time requests
-    - WebSocket streaming for real-time chat interactions
+
     - Multi-agent orchestration with intelligent routing
     - Session-based conversation management
-    
-    WebSocket Usage:
-    - Connect to /ws/chat/{session_id} for streaming chat
-    - Send messages as JSON: {"message": "your text here"}
-    - Receive streaming responses with different message types:
-      * "status": Processing updates
-      * "response": Orchestrator responses
-      * "agent_result": Agent execution results
-      * "complete": Final response with suggestions
-      * "error": Error messages
     """,
     version="1.0.0"
 )
@@ -81,41 +72,13 @@ app.add_middleware(
 # Global state management
 session_states: Dict[str, Dict[str, Any]] = {}
 
-# WebSocket Connection Manager
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: Dict[str, WebSocket] = {}
-    
-    async def connect(self, websocket: WebSocket, session_id: str):
-        await websocket.accept()
-        self.active_connections[session_id] = websocket
-        logger.info(f"WebSocket connected for session: {session_id}")
-    
-    def disconnect(self, session_id: str):
-        if session_id in self.active_connections:
-            del self.active_connections[session_id]
-            logger.info(f"WebSocket disconnected for session: {session_id}")
-    
-    async def send_message(self, session_id: str, message: dict):
-        if session_id in self.active_connections:
-            try:
-                await self.active_connections[session_id].send_text(json.dumps(message))
-            except Exception as e:
-                logger.error(f"Error sending message to {session_id}: {e}")
-                self.disconnect(session_id)
-    
-    async def send_stream_chunk(self, session_id: str, chunk: str, message_type: str = "stream"):
-        """Send a streaming chunk to the client"""
-        message = {
-            "type": message_type,
-            "content": chunk,
-            "timestamp": datetime.now().isoformat()
-        }
-        await self.send_message(session_id, message)
-
-# Initialize connection manager
-connection_manager = ConnectionManager()
-
+class TerraformUploadResponse(BaseModel):
+    message: str
+    filename: str
+    extracted_files: list[str] = Field(default_factory=list, description="List of .tf files extracted from the upload")
+    terraform_plan_result: Dict[str, Any]
+    success: bool
+    timestamp: datetime
 
 # Pydantic Models
 class ChatMessage(BaseModel):
@@ -181,7 +144,8 @@ class ChatOrchestrator:
         detect_agent = DetectAgent(self.model)
         drift_analyzer_agent = DriftAnalyzerAgent(self.model)
         remediate_agent = RemediateAgent(self.model)
-        
+        report_agent = ReportAgent(self.model)
+
         # Build the agent graph using GraphBuilder
         builder = GraphBuilder()
         
@@ -190,7 +154,8 @@ class ChatOrchestrator:
         detect_node = builder.add_node(detect_agent.get_agent(), "detect")
         analyzer_node = builder.add_node(drift_analyzer_agent.get_agent(), "analyzer")
         remediate_node = builder.add_node(remediate_agent.get_agent(), "remediate")
-        
+        report_node = builder.add_node(report_agent.get_agent(), "report")
+
         # Define the workflow edges - all agents connect directly to Orchestration Agent
         # Orchestration → DetectAgent
         builder.add_edge(orchestration_node, detect_node)
@@ -201,6 +166,9 @@ class ChatOrchestrator:
         # Orchestration → RemediateAgent
         builder.add_edge(orchestration_node, remediate_node)
         
+        # Orchestration → ReportAgent
+        builder.add_edge(orchestration_node, report_node)
+        
         # Build the graph
         graph = builder.build()
         
@@ -208,7 +176,8 @@ class ChatOrchestrator:
             'orchestration': orchestration_agent,
             'detect': detect_agent, 
             'analyzer': drift_analyzer_agent,
-            'remediate': remediate_agent
+            'remediate': remediate_agent,
+            'report': report_agent
         }
         
         return graph, agents
@@ -280,6 +249,7 @@ class ChatOrchestrator:
             response_content = ""
             routed_agents = []
             agent_results = {}
+            debug_logs = []  # Thêm logs để debug
             
             for node_id, node_result in result.results.items():
                 agent_results_list = node_result.get_agent_results()
@@ -292,16 +262,14 @@ class ChatOrchestrator:
                     
                     # Extract content from agent result
                     content = ""
-                    if hasattr(agent_result, 'message') and agent_result.message:
-                        # Try to get from message.content as list
-                        if hasattr(agent_result.message, 'content'):
-                            if isinstance(agent_result.message.content, list):
-                                for block in agent_result.message.content:
-                                    if isinstance(block, dict) and 'text' in block:
-                                        content += block['text']
-                            # If content is string
-                            elif isinstance(agent_result.message.content, str):
-                                content = agent_result.message.content
+                    if hasattr(agent_result.message, 'content'):
+                        message_content = agent_result.message["content"]
+                        if isinstance(message_content, list):
+                            for block in message_content:
+                                if isinstance(block, dict) and 'text' in block:
+                                    content += block['text']
+                        elif isinstance(message_content, str):
+                            content = message_content
                         
                         # If message is dict
                         elif isinstance(agent_result.message, dict):
@@ -328,36 +296,57 @@ class ChatOrchestrator:
                         response_content += f"\n\n🤖 {node_id.title()}Agent:\n{content}"
                         routed_agents.append(node_id)
                         agent_results[node_id] = content
-            
-            # Update workflow status
-            shared_memory.set("workflow_status", "completed")
-            shared_memory.set("completion_timestamp", datetime.now().isoformat())
-            
-            # Update conversation state based on agents that were executed
-            if "detect" in routed_agents:
-                session_state["conversation_state"] = "detection_complete"
-            elif "analyzer" in routed_agents:
-                session_state["conversation_state"] = "analysis_complete"
-            elif "remediate" in routed_agents:
-                session_state["conversation_state"] = "remediation_complete"
-            else:
-                session_state["conversation_state"] = "conversational"
-            
-            # Generate suggestions based on current state
-            suggestions = self._generate_suggestions(session_state["conversation_state"], routed_agents[0] if routed_agents else None)
-            
-            # Add assistant response to conversation history
-            session_state["conversation_history"].append({
-                "role": "assistant",
-                "message": response_content,
-                "routed_agents": routed_agents,
-                "agent_results": agent_results,
-                "timestamp": datetime.now()
-            })
-            
-            # Update session timestamp
-            session_state["timestamp"] = datetime.now()
-            
+                    
+                    # Thêm debug logs
+                    debug_info = {
+                        "agent": node_id,
+                        "message_type": str(type(agent_result.message)),
+                        "content_length": len(content) if content else 0,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    debug_logs.append(debug_info)
+                
+                # Update workflow status
+                shared_memory.set("workflow_status", "completed")
+                shared_memory.set("completion_timestamp", datetime.now().isoformat())
+                
+                # Update conversation state based on agents that were executed
+                if "detect" in routed_agents:
+                    session_state["conversation_state"] = "detection_complete"
+                elif "analyzer" in routed_agents:
+                    session_state["conversation_state"] = "analysis_complete"
+                elif "remediate" in routed_agents:
+                    session_state["conversation_state"] = "remediation_complete"
+                elif "report" in routed_agents:
+                    session_state["conversation_state"] = "report_complete"
+                else:
+                    session_state["conversation_state"] = "conversational"
+                
+                # Generate suggestions based on current state
+                suggestions = self._generate_suggestions(session_state["conversation_state"], routed_agents[0] if routed_agents else None)
+                
+                # Add assistant response to conversation history
+                session_state["conversation_history"].append({
+                    "role": "assistant",
+                    "message": response_content,
+                    "routed_agents": routed_agents,
+                    "agent_results": agent_results,
+                    "timestamp": datetime.now()
+                })
+                
+                # Update session timestamp
+                session_state["timestamp"] = datetime.now()
+                
+                # Lưu debug logs vào session state
+                if "debug_mode" in session_state and session_state["debug_mode"]:
+                    if "debug_logs" not in session_state:
+                        session_state["debug_logs"] = []
+                    session_state["debug_logs"].extend(debug_logs)
+                    
+                    # Giới hạn số lượng logs lưu trữ
+                    if len(session_state["debug_logs"]) > 100:
+                        session_state["debug_logs"] = session_state["debug_logs"][-100:]
+                
             return {
                 "session_id": session_id,
                 "response": response_content,
@@ -367,7 +356,7 @@ class ChatOrchestrator:
                 "timestamp": datetime.now(),
                 "suggestions": suggestions
             }
-            
+                
         except Exception as e:
             logger.error(f"Error processing chat message: {e}")
             error_response = f"I encountered an error while processing your message: {str(e)}. Please try again or rephrase your request."
@@ -388,172 +377,6 @@ class ChatOrchestrator:
                 "timestamp": datetime.now(),
                 "suggestions": ["Try rephrasing your request", "Ask for help", "Check system status"]
             }
-
-    async def process_streaming_chat_message(self, session_id: str, message: str, connection_manager: ConnectionManager):
-        """Process a chat message with streaming responses using the multi-agent graph system"""
-        if session_id not in session_states:
-            session_id = await self.initialize_session(session_id)
-        
-        session_state = session_states[session_id]
-        
-        try:
-            # Send initial acknowledgment
-            await connection_manager.send_stream_chunk(session_id, "Processing your message...", "status")
-            
-            # Add user message to conversation history
-            session_state["conversation_history"].append({
-                "role": "user",
-                "message": message,
-                "timestamp": datetime.now()
-            })
-            
-            # Update shared memory with conversation context (JSON-serializable only)
-            serializable_history = self._make_json_serializable(session_state["conversation_history"])
-            serializable_context = self._make_json_serializable(session_state.get("context", {}))
-            
-            shared_memory.set(f"session_{session_id}_history", serializable_history)
-            shared_memory.set("user_request", message)
-            shared_memory.set("workflow_status", "initiated")
-            shared_memory.set("request_timestamp", datetime.now().isoformat())
-            shared_memory.set("session_context", serializable_context)
-            
-            # Add request to history
-            if "request_history" not in shared_memory.data:
-                shared_memory.set("request_history", [])
-            
-            request_history = shared_memory.get("request_history", [])
-            request_history.append({
-                "request": message,
-                "timestamp": datetime.now().isoformat()
-            })
-            shared_memory.set("request_history", request_history[-5:])  # Keep last 5 requests
-            
-            # Send status update
-            await connection_manager.send_stream_chunk(session_id, "Executing multi-agent system...", "status")
-            
-            # Execute the graph with the user input
-            result = self.graph.execute(message)
-            
-            # Process results from each agent with streaming
-            response_content = ""
-            routed_agents = []
-            agent_results = {}
-            
-            for node_id, node_result in result.results.items():
-                agent_results_list = node_result.get_agent_results()
-                for i, agent_result in enumerate(agent_results_list):
-                    # Get agent from agents dictionary
-                    agent = self.agents.get(node_id)
-                    if agent:
-                        # Update agent status
-                        agent.update_agent_status(f"Processed request: {message[:50]}...")
-                        # Send streaming update
-                        await connection_manager.send_stream_chunk(session_id, f"Processing with {node_id.title()}Agent...", "status")
-                    
-                    # Extract content from agent result
-                    content = ""
-                    if hasattr(agent_result, 'message') and agent_result.message:
-                        # Try to get from message.content as list
-                        if hasattr(agent_result.message, 'content'):
-                            if isinstance(agent_result.message.content, list):
-                                for block in agent_result.message.content:
-                                    if isinstance(block, dict) and 'text' in block:
-                                        content += block['text']
-                            # If content is string
-                            elif isinstance(agent_result.message.content, str):
-                                content = agent_result.message.content
-                        
-                        # If message is dict
-                        elif isinstance(agent_result.message, dict):
-                            if 'content' in agent_result.message:
-                                if isinstance(agent_result.message['content'], list):
-                                    for block in agent_result.message['content']:
-                                        if isinstance(block, dict) and 'text' in block:
-                                            content += block['text']
-                                elif isinstance(agent_result.message['content'], str):
-                                    content = agent_result.message['content']
-                    
-                    # If all fails, try to get string from message
-                    if not content and hasattr(agent_result, 'message'):
-                        content = str(agent_result.message)
-                    
-                    # Save to shared memory with valuable content
-                    shared_memory.set(f"{node_id}_response_{i}", {
-                        "content": content if content else agent_result.message if hasattr(agent_result, 'message') else "No extractable content",
-                        "timestamp": datetime.now().isoformat()
-                    })
-                    
-                    # Stream the agent result
-                    if content:
-                        agent_response = f"\n\n🤖 {node_id.title()}Agent:\n{content}"
-                        await connection_manager.send_stream_chunk(session_id, agent_response, "agent_result")
-                        response_content += agent_response
-                        routed_agents.append(node_id)
-                        agent_results[node_id] = content
-            
-            # Update workflow status
-            shared_memory.set("workflow_status", "completed")
-            shared_memory.set("completion_timestamp", datetime.now().isoformat())
-            
-            # Update conversation state based on agents that were executed
-            if "detect" in routed_agents:
-                session_state["conversation_state"] = "detection_complete"
-            elif "analyzer" in routed_agents:
-                session_state["conversation_state"] = "analysis_complete"
-            elif "remediate" in routed_agents:
-                session_state["conversation_state"] = "remediation_complete"
-            else:
-                session_state["conversation_state"] = "conversational"
-            
-            # Generate suggestions based on current state
-            suggestions = self._generate_suggestions(session_state["conversation_state"], routed_agents[0] if routed_agents else None)
-            
-            # Add assistant response to conversation history
-            session_state["conversation_history"].append({
-                "role": "assistant",
-                "message": response_content,
-                "routed_agents": routed_agents,
-                "agent_results": agent_results,
-                "timestamp": datetime.now()
-            })
-            
-            # Update session timestamp
-            session_state["timestamp"] = datetime.now()
-            
-            # Send final response with suggestions
-            final_response = {
-                "type": "complete",
-                "session_id": session_id,
-                "routed_agent": routed_agents[0] if routed_agents else None,
-                "conversation_state": session_state["conversation_state"],
-                "timestamp": datetime.now().isoformat(),
-                "suggestions": suggestions
-            }
-            
-            await connection_manager.send_message(session_id, final_response)
-            
-        except Exception as e:
-            logger.error(f"Error processing streaming chat message: {e}")
-            error_response = f"I encountered an error while processing your message: {str(e)}. Please try again or rephrase your request."
-            
-            session_state["conversation_history"].append({
-                "role": "assistant",
-                "message": error_response,
-                "error": True,
-                "timestamp": datetime.now()
-            })
-            
-            await connection_manager.send_stream_chunk(session_id, error_response, "error")
-            
-            final_response = {
-                "type": "error",
-                "session_id": session_id,
-                "conversation_state": session_state["conversation_state"],
-                "timestamp": datetime.now().isoformat(),
-                "suggestions": ["Try rephrasing your request", "Ask for help", "Check system status"]
-            }
-            
-            await connection_manager.send_message(session_id, final_response)
     
     # Note: _execute_agent and _execute_agent_streaming methods removed
     # The graph-based approach now handles agent execution directly
@@ -584,6 +407,12 @@ class ChatOrchestrator:
                 "Request validation of the applied fixes",
                 "Start a new drift detection session"
             ]
+        elif conversation_state == "report_complete":
+            return [
+                "Ask me to run another drift detection",
+                "Request validation of the applied fixes",
+                "Start a new drift detection session"
+            ]
         else:
             return [
                 "Ask for status update",
@@ -606,21 +435,11 @@ async def root():
         "version": "1.0.0",
         "terraform_dir": TERRAFORM_DIR,
         "endpoints": {
-            "websocket_chat": "/ws/chat/{session_id}",
             "rest_chat": "/chat",
             "test_client": "/test-client"
         }
     }
 
-
-@app.get("/test-client", response_class=HTMLResponse, summary="WebSocket Test Client")
-async def get_test_client():
-    """Serve the HTML test client for WebSocket chat"""
-    try:
-        with open("websocket_client.html", "r") as file:
-            return HTMLResponse(content=file.read(), status_code=200)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Test client not found")
 
 
 @app.post("/chat", response_model=ChatResponse, summary="Chat with Terraform Drift Assistant")
@@ -640,64 +459,6 @@ async def chat(request: ChatMessage):
     except Exception as e:
         logger.error(f"Error in chat processing: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to process chat message: {e}")
-
-
-@app.websocket("/ws/chat/{session_id}")
-async def websocket_chat(websocket: WebSocket, session_id: str):
-    """WebSocket endpoint for streaming chat with Terraform Drift Assistant"""
-    await connection_manager.connect(websocket, session_id)
-    
-    try:
-        # Initialize session if needed
-        await orchestrator.initialize_session(session_id)
-        
-        # Send welcome message
-        welcome_message = {
-            "type": "welcome",
-            "content": "Connected to Terraform Drift Assistant. How can I help you today?",
-            "session_id": session_id,
-            "timestamp": datetime.now().isoformat(),
-            "suggestions": [
-                "Ask me to check for infrastructure drift",
-                "Request a scan of your Terraform resources",
-                "Get help with the system capabilities"
-            ]
-        }
-        await connection_manager.send_message(session_id, welcome_message)
-        
-        while True:
-            try:
-                # Receive message from client
-                data = await websocket.receive_text()
-                message_data = json.loads(data)
-                
-                # Extract user message
-                user_message = message_data.get("message", "")
-                
-                if user_message.strip():
-                    # Process the message with streaming response
-                    await orchestrator.process_streaming_chat_message(session_id, user_message, connection_manager)
-                
-            except json.JSONDecodeError:
-                await connection_manager.send_stream_chunk(
-                    session_id, 
-                    "Invalid message format. Please send valid JSON.", 
-                    "error"
-                )
-            except Exception as e:
-                logger.error(f"Error processing WebSocket message: {e}")
-                await connection_manager.send_stream_chunk(
-                    session_id, 
-                    f"Error processing your message: {str(e)}", 
-                    "error"
-                )
-                
-    except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected for session: {session_id}")
-    except Exception as e:
-        logger.error(f"WebSocket error for session {session_id}: {e}")
-    finally:
-        connection_manager.disconnect(session_id)
 
 
 @app.post("/start-session", summary="Start New Chat Session")
@@ -767,25 +528,6 @@ async def get_shared_memory():
     }
 
 
-@app.get("/websocket-connections", summary="Get Active WebSocket Connections")
-async def get_websocket_connections():
-    """Get information about active WebSocket connections"""
-    connections = []
-    for session_id, websocket in connection_manager.active_connections.items():
-        session_info = session_states.get(session_id, {})
-        connections.append({
-            "session_id": session_id,
-            "conversation_state": session_info.get("conversation_state", "unknown"),
-            "last_activity": session_info.get("timestamp", "unknown"),
-            "messages_count": len(session_info.get("conversation_history", []))
-        })
-    
-    return {
-        "active_connections": len(connection_manager.active_connections),
-        "connections": connections,
-        "timestamp": datetime.now()
-    }
-
 
 @app.get("/system-status", response_model=SystemStatus, summary="Get System Status")
 async def get_system_status():
@@ -801,29 +543,12 @@ async def get_system_status():
     )
 
 
-@app.get("/approve/{approval_id}", summary="Approve or deny a pending action")
-async def approve_action(approval_id: str, approved: bool):
-    """Approve or deny a pending tool execution request"""
-    if approval_id not in permission_manager.pending_approvals:
-        raise HTTPException(status_code=404, detail="Approval ID not found or already processed")
-
-    # Update the status of the pending approval
-    if approved:
-        permission_manager.pending_approvals[approval_id]["status"] = "approved"
-        return {"message": f"Request {approval_id} approved."}
-    else:
-        permission_manager.pending_approvals[approval_id]["status"] = "denied"
-        return {"message": f"Request {approval_id} denied."}
-
-
 @app.delete("/session/{session_id}", summary="Clear Session")
 async def clear_session(session_id: str):
     """Clear a specific session"""
     if session_id not in session_states:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    # Disconnect WebSocket if active
-    connection_manager.disconnect(session_id)
     
     # Clear session state
     del session_states[session_id]
@@ -836,16 +561,457 @@ async def clear_all_sessions():
     """Clear all sessions and reset shared memory"""
     global session_states
     
-    # Disconnect all WebSocket connections
-    for session_id in list(connection_manager.active_connections.keys()):
-        connection_manager.disconnect(session_id)
     
     # Clear session states and shared memory
     session_states.clear()
     shared_memory.clear()
     
-    return {"message": "All sessions cleared, WebSocket connections closed, and shared memory reset"}
+    return {"message": "All sessions cleared, and shared memory reset"}
 
+
+@app.post("/generate-report", summary="Generate Drift Report")
+async def generate_report():
+    """Generate a JSON report of drift detection results"""
+    try:
+        # Access the report agent
+        report_agent = orchestrator.agents.get('report')
+        if not report_agent:
+            raise HTTPException(status_code=404, detail="Report agent not available")
+            
+        # Generate the report
+        report = report_agent.generate_json_report("report.json")
+        
+        # Read the report file to return in response
+        try:
+            with open("report.json", "r") as f:
+                report_content = json.load(f)
+        except Exception as e:
+            logger.error(f"Error reading report file: {e}")
+            report_content = {"error": f"Could not read report file: {e}"}
+        
+        # Return report details and content
+        return {
+            "message": "Report generated successfully",
+            "file_path": "report.json",
+            "scan_details": {
+                "id": report.get("scanDetails", {}).get("id"),
+                "fileName": report.get("scanDetails", {}).get("fileName"),
+                "scanDate": report.get("scanDetails", {}).get("scanDate"),
+                "status": report.get("scanDetails", {}).get("status"),
+                "totalResources": report.get("scanDetails", {}).get("totalResources"),
+                "driftCount": report.get("scanDetails", {}).get("driftCount"),
+                "riskLevel": report.get("scanDetails", {}).get("riskLevel")
+            },
+            "total_drifts": len(report.get("drifts", [])),
+            "report_content": report_content
+        }
+            
+    except Exception as e:
+        logger.error(f"Error generating report: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate report: {e}")
+
+
+@app.get("/terraform-status", summary="Get Terraform Files Status")
+async def get_terraform_status():
+    """Get information about Terraform files in the working directory"""
+    try:
+        from pathlib import Path
+        
+        # Check if terraform directory exists
+        if os.path.exists(TERRAFORM_DIR):
+            tf_files = list(Path(TERRAFORM_DIR).glob("*.tf"))
+            state_files = list(Path(TERRAFORM_DIR).glob("*.tfstate"))
+            
+            # Get file details
+            tf_file_details = []
+            for file in tf_files:
+                file_stat = os.stat(file)
+                tf_file_details.append({
+                    "name": file.name,
+                    "size": file_stat.st_size,
+                    "last_modified": datetime.fromtimestamp(file_stat.st_mtime).isoformat()
+                })
+                
+            state_file_details = []
+            for file in state_files:
+                file_stat = os.stat(file)
+                state_file_details.append({
+                    "name": file.name,
+                    "size": file_stat.st_size,
+                    "last_modified": datetime.fromtimestamp(file_stat.st_mtime).isoformat()
+                })
+                
+            return {
+                "terraform_dir": TERRAFORM_DIR,
+                "exists": True,
+                "tf_files_count": len(tf_files),
+                "state_files_count": len(state_files),
+                "tf_files": tf_file_details,
+                "state_files": state_file_details
+            }
+        else:
+            return {
+                "terraform_dir": TERRAFORM_DIR,
+                "exists": False,
+                "error": f"Terraform directory {TERRAFORM_DIR} not found"
+            }
+    except Exception as e:
+        logger.error(f"Error checking Terraform status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to check Terraform status: {e}")
+
+
+@app.get("/help", summary="Get Help Information")
+async def get_help():
+    """Retrieve help information about the system"""
+    return {
+        "system_overview": {
+            "description": "Terraform Drift Detection & Remediation System",
+            "agents": [
+                {"name": "OrchestrationAgent", "role": "Coordinates the entire workflow"},
+                {"name": "DetectAgent", "role": "Finds drift between Terraform state and AWS"},
+                {"name": "DriftAnalyzerAgent", "role": "Analyzes impact and provides recommendations"},
+                {"name": "RemediateAgent", "role": "Applies fixes to remediate drift"},
+                {"name": "ReportAgent", "role": "Generates reports on drift findings"}
+            ]
+        },
+        "commands": [
+            {"name": "detect", "description": "Start drift detection process"},
+            {"name": "analyze", "description": "Run analysis on detected drift"},
+            {"name": "remediate", "description": "Apply recommended fixes"},
+            {"name": "report", "description": "Generate JSON report"},
+            {"name": "status", "description": "Show current system status"}
+        ],
+        "example_usage": [
+            {"example": "detect", "description": "Runs drift detection on Terraform resources"},
+            {"example": "analyze high priority drift", "description": "Analyze only high priority drift issues"},
+            {"example": "remediate security issues only", "description": "Apply fixes to security-related issues"}
+        ]
+    }
+
+
+@app.get("/detailed-memory", summary="Get Detailed Shared Memory")
+async def get_detailed_memory():
+    """Get detailed contents of the shared memory"""
+    try:
+        result = {}
+        
+        # Organize data in a readable format
+        if shared_memory.data:
+            # Group responses
+            responses = {}
+            agent_status = {}
+            other_data = {}
+            
+            for key, value in shared_memory.data.items():
+                if "_response_" in key and isinstance(value, dict):
+                    agent_name = key.split('_response_')[0]
+                    if agent_name not in responses:
+                        responses[agent_name] = []
+                    
+                    # Add content with appropriate length limits
+                    content_summary = {}
+                    if "content" in value and value["content"]:
+                        content = value["content"]
+                        if isinstance(content, str):
+                            content_summary["content"] = (content[:100] + '...') if len(content) > 100 else content
+                            content_summary["content_length"] = len(content)
+                        else:
+                            content_summary["content"] = str(content)
+                    
+                    # Add timestamp
+                    if "timestamp" in value:
+                        content_summary["timestamp"] = value["timestamp"]
+                        
+                    responses[agent_name].append(content_summary)
+                
+                # Process agent status data
+                elif "_status" in key and isinstance(value, dict):
+                    agent_status[key] = {}
+                    for sub_key, sub_value in value.items():
+                        if isinstance(sub_value, dict):
+                            agent_status[key][sub_key] = json.dumps(sub_value)[:100] + '...' if len(json.dumps(sub_value)) > 100 else json.dumps(sub_value)
+                        else:
+                            sub_str = str(sub_value)
+                            agent_status[key][sub_key] = sub_str[:80] + '...' if len(sub_str) > 80 else sub_str
+                
+                # Other data
+                else:
+                    if isinstance(value, str) and len(value) > 100:
+                        other_data[key] = value[:100] + '...'
+                    else:
+                        other_data[key] = value
+            
+            result["responses"] = responses
+            result["agent_status"] = agent_status
+            result["other_data"] = other_data
+            result["keys_count"] = len(shared_memory.data)
+            
+        else:
+            result["status"] = "Empty shared memory"
+            
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error retrieving detailed shared memory: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve detailed shared memory: {e}")
+
+
+@app.post("/debug-mode/{session_id}", summary="Toggle Debug Mode")
+async def toggle_debug_mode(session_id: str, enable_debug: bool = True):
+    """Enable or disable debug mode for a session"""
+    if session_id not in session_states:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session_state = session_states[session_id]
+    session_state["debug_mode"] = enable_debug
+    
+    return {
+        "session_id": session_id,
+        "debug_mode": enable_debug,
+        "message": f"Debug mode {'enabled' if enable_debug else 'disable'} for session {session_id}"
+    }
+
+
+@app.get("/logs/{session_id}", summary="Get Debug Logs for Session")
+async def get_debug_logs(session_id: str):
+    """Get debug logs for a specific session"""
+    if session_id not in session_states:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session_state = session_states[session_id]
+    debug_logs = session_state.get("debug_logs", [])
+    
+    return {
+        "session_id": session_id,
+        "log_count": len(debug_logs),
+        "logs": debug_logs
+    }
+
+
+@app.get("/report", summary="Get Report Content")
+async def get_report():
+    """Get the contents of report.json file"""
+    try:
+        report_path = os.path.join(os.path.dirname(__file__), 'report.json')
+        
+        # Check if file exists
+        if not os.path.exists(report_path):
+            raise HTTPException(
+                status_code=404,
+                detail="report.json not found"
+            )
+            
+        # Read and parse JSON file
+        with open(report_path, 'r') as f:
+            report_content = json.load(f)
+            
+        return JSONResponse(
+            content=report_content,
+            status_code=200
+        )
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing report.json: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error parsing report.json - invalid JSON format"
+        )
+    except Exception as e:
+        logger.error(f"Error reading report.json: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read report.json: {str(e)}"
+        )
+
+
+@app.post("/upload-terraform", response_model=TerraformUploadResponse, summary="Upload Terraform File/Folder and Run Plan")
+async def upload_terraform_file(file: UploadFile = File(...)):
+    """
+    Upload a .tf file or a zip folder containing .tf files, replace existing terraform files, and run terraform plan
+    
+    This endpoint:
+    1. Validates that the uploaded file is a .tf file or .zip folder
+    2. If zip file, extracts only .tf files from the folder structure
+    3. Clears the current terraform directory
+    4. Saves the .tf files to the terraform directory
+    5. Runs terraform plan to generate/update the .tfstate file
+    
+    Returns the terraform plan results including any changes detected.
+    """
+    try:
+        # Validate file extension
+        if not file.filename:
+            raise HTTPException(
+                status_code=400, 
+                detail="No filename provided."
+            )
+        
+        is_zip = file.filename.lower().endswith('.zip')
+        is_tf = file.filename.lower().endswith('.tf')
+        
+        if not (is_zip or is_tf):
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid file type. Only .tf files or .zip folders are allowed."
+            )
+        
+        logger.info(f"Processing upload of {'zip folder' if is_zip else 'terraform file'}: {file.filename}")
+        
+        # Read file content
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Empty file uploaded")
+        
+        # Clear existing files in terraform directory (but preserve .terraform and .tfstate files)
+        terraform_dir = os.path.abspath(TERRAFORM_DIR)
+        
+        # Ensure terraform directory exists
+        os.makedirs(terraform_dir, exist_ok=True)
+        
+        # Remove existing .tf files, but preserve terraform state and cache
+        for tf_file in glob.glob(os.path.join(terraform_dir, "*.tf")):
+            try:
+                os.remove(tf_file)
+                logger.info(f"Removed existing terraform file: {tf_file}")
+            except Exception as e:
+                logger.warning(f"Could not remove {tf_file}: {e}")
+        
+        # Remove other non-essential files but keep .terraform directory and .tfstate files
+        for file_pattern in ["*.md", "*.txt"]:
+            for file_to_remove in glob.glob(os.path.join(terraform_dir, file_pattern)):
+                try:
+                    os.remove(file_to_remove)
+                    logger.info(f"Removed file: {file_to_remove}")
+                except Exception as e:
+                    logger.warning(f"Could not remove {file_to_remove}: {e}")
+        
+        extracted_files = []
+        
+        if is_zip:
+            # Handle zip folder upload
+            try:
+                # Create a temporary directory to extract files
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    # Save zip file to temp directory
+                    temp_zip_path = os.path.join(temp_dir, file.filename)
+                    with open(temp_zip_path, 'wb') as f:
+                        f.write(content)
+                    
+                    # Extract zip file
+                    with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
+                        zip_ref.extractall(temp_dir)
+                    
+                    # Find all .tf files in the extracted directory
+                    tf_files_found = []
+                    for root, dirs, files in os.walk(temp_dir):
+                        for file_name in files:
+                            if file_name.lower().endswith('.tf'):
+                                tf_files_found.append(os.path.join(root, file_name))
+                    
+                    if not tf_files_found:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="No .tf files found in the uploaded zip folder."
+                        )
+                    
+                    # Copy .tf files to terraform directory
+                    for tf_file_path in tf_files_found:
+                        file_name = os.path.basename(tf_file_path)
+                        dest_path = os.path.join(terraform_dir, file_name)
+                        
+                        # Handle duplicate filenames by adding a number suffix
+                        counter = 1
+                        original_name = file_name
+                        while os.path.exists(dest_path):
+                            name_without_ext = os.path.splitext(original_name)[0]
+                            ext = os.path.splitext(original_name)[1]
+                            file_name = f"{name_without_ext}_{counter}{ext}"
+                            dest_path = os.path.join(terraform_dir, file_name)
+                            counter += 1
+                        
+                        shutil.copy2(tf_file_path, dest_path)
+                        extracted_files.append(file_name)
+                        logger.info(f"Extracted and saved terraform file: {file_name}")
+                
+                logger.info(f"Successfully extracted {len(extracted_files)} .tf files from zip folder")
+                
+            except zipfile.BadZipFile:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid zip file format."
+                )
+            except Exception as e:
+                logger.error(f"Error processing zip file: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to process zip file: {str(e)}"
+                )
+        else:
+            # Handle single .tf file upload
+            new_file_path = os.path.join(terraform_dir, file.filename)
+            
+            with open(new_file_path, 'wb') as f:
+                f.write(content)
+            
+            extracted_files.append(file.filename)
+            logger.info(f"Saved terraform file: {new_file_path}")
+        
+        # Run terraform plan using MCP tools with ExecuteTerraformCommand from awblab
+        logger.info("Running terraform plan using ExecuteTerraformCommand from awblab MCP...")
+        
+        # First, try to initialize terraform if needed
+        logger.info("Initializing terraform...")
+        init_result = terraform_run_command(
+            command="init",
+            working_directory=terraform_dir
+        )
+        
+        if not init_result.get("success", False):
+            logger.warning(f"Terraform init failed: {init_result.get('output', 'Unknown error')}")
+            # Continue anyway, as some configurations might not need init
+        
+        # Use terraform_run_command with ExecuteTerraformCommand from awblab MCP
+        logger.info("Running terraform plan using ExecuteTerraformCommand...")
+        plan_result = terraform_run_command(
+            command="plan",
+            working_directory=terraform_dir
+        )
+        
+        # Update shared memory with the upload results
+        shared_memory.set("last_uploaded_file", file.filename)
+        shared_memory.set("extracted_terraform_files", extracted_files)
+        shared_memory.set("terraform_plan_result", plan_result)
+        shared_memory.set("terraform_directory", terraform_dir)
+        
+        success = plan_result.get("success", False)
+        
+        if success:
+            if is_zip:
+                message = f"Successfully uploaded zip folder '{file.filename}' with {len(extracted_files)} .tf files and ran terraform plan"
+            else:
+                message = f"Successfully uploaded {file.filename} and ran terraform plan"
+        else:
+            if is_zip:
+                message = f"Uploaded zip folder '{file.filename}' with {len(extracted_files)} .tf files but terraform plan encountered issues"
+            else:
+                message = f"Uploaded {file.filename} but terraform plan encountered issues"
+        return TerraformUploadResponse(
+            message=message,
+            filename=file.filename,
+            extracted_files=extracted_files,
+            terraform_plan_result=plan_result,
+            success=success,
+            timestamp=datetime.now()
+        )
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading terraform file: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to upload and process terraform file: {str(e)}"
+        )
 
 if __name__ == "__main__":
     # Ensure terraform directory exists
