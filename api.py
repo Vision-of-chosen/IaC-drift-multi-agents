@@ -958,6 +958,40 @@ async def get_shared_memory():
         "timestamp": datetime.now()
     }
 
+@app.get("/report", summary="Get Report Content")
+async def get_report():
+    """Get the contents of report.json file"""
+    try:
+        report_path = os.path.join(os.path.dirname(__file__), 'report.json')
+        
+        # Check if file exists
+        if not os.path.exists(report_path):
+            raise HTTPException(
+                status_code=404,
+                detail="report.json not found"
+            )
+            
+        # Read and parse JSON file
+        with open(report_path, 'r') as f:
+            report_content = json.load(f)
+            
+        return JSONResponse(
+            content=report_content,
+            status_code=200
+        )
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing report.json: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error parsing report.json - invalid JSON format"
+        )
+    except Exception as e:
+        logger.error(f"Error reading report.json: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read report.json: {str(e)}"
+
 
 @app.get("/system-status", response_model=SystemStatus, summary="Get System Status")
 async def get_system_status():
