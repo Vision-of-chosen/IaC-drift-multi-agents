@@ -1,6 +1,18 @@
 # Terraform Drift Detection & Remediation System
 
-An advanced multi-agent system powered by AWS Bedrock Claude that automatically detects, analyzes, and remediates infrastructure drift in AWS environments. The system provides a FastAPI-based web interface for step-by-step infrastructure management.
+An advanced multi-agent system powered by AWS Bedrock Claude that automatica## 🔒 Security Features
+
+1. **AWS Security**
+   - IAM role integration
+   - Secure credential handling
+   - Resource tagging
+
+2. **API Security**
+   - Request validation
+   - Rate limiting
+   - Session management
+
+## � Monitoring & Loggingzes, and remediates infrastructure drift in AWS environments. The system provides a FastAPI-based web interface for step-by-step infrastructure management.
 
 ## 🌟 Key Featuresraform Drift Detection & Remediation System
 

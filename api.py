@@ -37,7 +37,6 @@ from strands.multiagent.graph import GraphBuilder
 from agents import OrchestrationAgent, DetectAgent, DriftAnalyzerAgent, RemediateAgent, ReportAgent
 from shared_memory import shared_memory
 from config import BEDROCK_MODEL_ID, BEDROCK_REGION, TERRAFORM_DIR
-from permission_handlers import permission_manager
 
 from useful_tools.terraform_mcp_tool import terraform_run_command
 from useful_tools.terraform_tools import terraform_plan, terraform_apply
