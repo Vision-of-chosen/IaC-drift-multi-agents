@@ -1,278 +1,186 @@
 # Terraform Drift Detection & Remediation System
 
-A multi-agent orchestration system that automatically detects, analyzes, and remediates Terraform infrastructure drift through terminal-based chat interaction using the strand-agents framework.
+An advanced multi-agent system powered by AWS Bedrock Claude that automatically detects, analyzes, and remediates infrastructure drift in AWS environments. The system provides a FastAPI-based web interface for step-by-step infrastructure management.
 
-## 🏗️ Architecture Overview
+## 🌟 Key Featuresraform Drift Detection & Remediation System
 
-The system uses four specialized AI agents working together through a shared memory architecture:
+An advanced multi-agent system powered by AWS Bedrock Claude that automatically detects, analyzes, and remediates infrastructure drift in AWS environments. The system provides a FastAPI-based web interface for step-by-step infrastructure management.
 
-### Agent Ecosystem
+## � Key Features
 
-1. **OrchestrationAgent** (Central Coordinator)
-   - Receives user requests from ChatBot UI
-   - Routes requests to appropriate specialized agents
-   - Manages workflow between DetectAgent, DriftAnalyzerAgent, and RemediateAgent
-   - Coordinates shared memory and data flow
-   - Provides status updates to user
+- **Smart Multi-Agent Architecture**
+  - Orchestration Agent coordinates the workflow
+  - Detection Agent identifies infrastructure drift
+  - Analyzer Agent assesses impact and severity
+  - Remediation Agent implements fixes
+  - Report Agent generates detailed documentation
 
-2. **DetectAgent** (Drift Detection Specialist)
-   - Parses current Terraform state files
-   - Queries actual AWS infrastructure using use-aws tool
-   - Compares planned vs actual resource configurations
-   - Generates drift detection reports
-   - Stores findings in shared memory
+- **API-First Design**
+  - RESTful endpoints for each workflow step
+  - Session management for workflow state
+  - Real-time progress updates
+  - Background task processing
 
-3. **DriftAnalyzerAgent** (Analysis & Assessment)
-   - Analyzes drift severity and impact assessment
-   - Categorizes drift types (configuration, resource state, security implications)
-   - Generates remediation recommendations
-   - Provides analysis summary to shared memory
+- **AWS Integration**
+  - AWS Bedrock Claude for intelligent analysis
+  - Terraform state management
+  - AWS infrastructure querying
+  - Secure remediation execution
 
-4. **RemediateAgent** (Automated Remediation)
-   - Generates corrected Terraform configurations
-   - Creates new .tf files using strand-tools file writer
-   - Generates and reviews Terraform plans
-   - Applies approved changes using AWS tools
-   - Updates shared memory with remediation results
+## 🚀 Quick Start
 
-## 🚀 Getting Started
-
-### Prerequisites
-
-1. **AWS Credentials**: Ensure your AWS credentials are configured
+1. **Prerequisites**
    ```bash
-   aws configure
-   # or use environment variables
+   # Install dependencies
+   pip install -r requirements.txt
+
+   # Configure AWS credentials
    export AWS_ACCESS_KEY_ID=your_key
    export AWS_SECRET_ACCESS_KEY=your_secret
-   export AWS_REGION=ap-southeast-2
+   export AWS_REGION=your_region
    ```
 
-2. **Strands Agent SDK**: Install the required components
+2. **Start the API Server**
    ```bash
-   # Install from the AI-backend directory
-   pip install -e ./sdk-python
-   pip install -e ./tools
-   
-   # Or install additional dependencies
-   pip install -r requirements.txt
+   # Run the FastAPI server
+   uvicorn api:app --reload
    ```
 
-3. **Terraform**: Install Terraform CLI
-   ```bash
-   # macOS
-   brew install terraform
-   
-   # Ubuntu/Debian
-   sudo apt-get install terraform
-   
-   # Or download from: https://www.terraform.io/downloads.html
-   ```
+3. **Access the API**
+   - API documentation: http://localhost:8000/docs
+   - Swagger UI: http://localhost:8000/redoc
 
-### Installation
+## � API Endpoints
 
-1. **Clone and setup**:
-   ```bash
-   cd AI-backend
-   python terraform_drift_system.py
-   ```
+The system exposes the following RESTful endpoints:
 
-2. **Configure your Terraform directory**:
-   - Place your Terraform files in `./terraform/`
-   - Ensure you have `.tf` and `.tfstate` files
-   - The system will automatically detect and analyze these files
+### Detection Endpoints
+- `POST /detect` - Start drift detection process
+  ```json
+  {
+    "terraform_dir": "string",
+    "resource_types": ["string"]
+  }
+  ```
 
-## 🎯 Usage
+### Analysis Endpoints
+- `GET /status` - Check current system status
+- `POST /analyze` - Analyze detected drift
+  ```json
+  {
+    "severity_level": "string",
+    "resource_ids": ["string"]
+  }
+  ```
 
-### Interactive Terminal Interface
+### Remediation Endpoints
+- `POST /remediate` - Execute drift remediation
+  ```json
+  {
+    "resource_ids": ["string"],
+    "auto_approve": boolean
+  }
+  ```
 
-Start the system:
+### Reporting Endpoints
+- `GET /report` - Generate detailed reports
+- `GET /report/{report_id}` - Get specific report
+
+## 🏗️ Project Structure
+
+```
+IaC-drift-multi-agents/
+├── api.py                    # FastAPI application
+├── config.py                # Configuration settings
+├── shared_memory.py         # Shared state management
+├── agents/                  # AI agents
+│   ├── orchestration_agent.py
+│   ├── detect_agent.py
+│   ├── drift_analyzer_agent.py
+│   ├── remediate_agent.py
+│   └── report_agent.py
+├── useful_tools/           # Utility functions
+│   ├── terraform_tools.py
+│   ├── aws_documentation.py
+│   └── terraform_mcp_tool.py
+└── terraform/              # Infrastructure
+    ├── main.tf
+    └── variables.tf
+```
+
+## ⚙️ Configuration
+
+### Environment Variables
 ```bash
-python terraform_drift_system.py
+# AWS Configuration
+AWS_ACCESS_KEY_ID=your_key
+AWS_SECRET_ACCESS_KEY=your_secret
+AWS_REGION=your_region
+
+# Bedrock Configuration
+BEDROCK_MODEL_ID=anthropic.claude-v2
+BEDROCK_REGION=us-east-1
+
+# API Configuration
+API_HOST=0.0.0.0
+API_PORT=8000
 ```
 
-### Available Commands
+## 🔒 Security Features
 
-- `detect` - Run drift detection process
-- `analyze` - Analyze detected drift 
-- `remediate` - Apply drift remediation
-- `status` - Check system status
-- `memory` - View shared memory
-- `help` - Show help information
-- `exit` - Exit the system
+1. **Permission Management**
+   - Role-based access control
+   - Resource-level permissions
+   - Audit logging
 
-### Example Usage Scenarios
+2. **AWS Security**
+   - IAM role integration
+   - Secure credential handling
+   - Resource tagging
 
-1. **Basic Drift Detection**:
-   ```
-   > detect
-   ```
+3. **API Security**
+   - Request validation
+   - Rate limiting
+   - Session management
 
-2. **Targeted Analysis**:
-   ```
-   > analyze high priority security drift
-   ```
+## � Monitoring & Logging
 
-3. **Selective Remediation**:
-   ```
-   > remediate only critical issues
-   ```
+### System Monitoring
+- API endpoint metrics
+- Agent performance tracking
+- Resource usage statistics
 
-4. **Full Workflow**:
-   ```
-   > detect and analyze all infrastructure drift
-   > remediate approved changes only
-   ```
+### Logging
+- Request/response logging
+- Error tracking
+- Audit trail
 
-## 🔧 Configuration
+### Status Tracking
+- Background task status
+- Agent operation progress
+- Drift detection results
 
-### Model Configuration
+## � Contributing
 
-The system uses **Anthropic Claude 3.5 Sonnet** via AWS Bedrock:
-- **Model**: `apac.anthropic.claude-3-5-sonnet-20240620-v1:0`
-- **Region**: `ap-southeast-2`
-- **Temperature**: `0.1` (for consistent, deterministic responses)
+1. Fork the repository
+2. Create a feature branch
+3. Submit a pull request with:
+   - Detailed description
+   - Test cases
+   - Documentation updates
 
-### Directory Structure
+## 📚 Documentation
 
-```
-AI-backend/
-├── terraform_drift_system.py    # Main system file
-├── requirements.txt              # Python dependencies
-├── README.md                    # This file
-└── terraform/                  # Your Terraform files
-    ├── main.tf                 # Your infrastructure definitions
-    ├── variables.tf            # Variable definitions
-    ├── outputs.tf              # Output definitions
-    └── terraform.tfstate       # Current state file
-```
+- [Architecture Details](README_ARCHITECTURE.md)
+- [System Overview](drift_system_README.md)
+- API Documentation (available at /docs endpoint)
 
-## 🛠️ System Workflow
+## 🆘 Support
 
-### 1. User Interaction Flow
-```
-User Request → ChatBot UI → Orchestration Agent → Specialized Agents
-```
-
-### 2. Agent Collaboration Pattern
-```
-DetectAgent → [Shared Memory] → DriftAnalyzerAgent → [Shared Memory] → RemediateAgent
-```
-
-### 3. Tool Integration
-
-- **strand-tools**: AWS operations, file writing, state parsing
-- **use_aws**: Advanced AWS analysis, resource querying
-- **file_read/file_write**: File system operations
-- **editor**: Code modification and generation
-
-## 🔍 Key Features
-
-### Shared Memory Architecture
-- **Cross-Agent Data Sharing**: All agents access common memory space
-- **State Persistence**: Maintain workflow state across agent interactions
-- **Context Preservation**: Retain conversation context and intermediate results
-
-### Tool Ecosystem Integration
-- **strand-tools**: Primary toolkit for AWS operations and file management
-- **AWS Integration**: Direct access to AWS APIs for resource state querying
-- **File System Access**: Direct access to ./terraform directory structure
-
-### Automation Capabilities
-- **Automated Drift Detection**: Continuous monitoring of infrastructure state
-- **Intelligent Analysis**: Context-aware drift impact assessment
-- **Remediation Planning**: Automated generation of corrective Terraform code
-- **Safe Execution**: Controlled application of infrastructure changes
-
-## 📊 Expected Outputs
-
-1. **Drift Detection Reports**: Detailed infrastructure state comparisons
-2. **Analysis Summaries**: Risk assessments and remediation priorities
-3. **Remediation Plans**: Generated Terraform configurations
-4. **Execution Reports**: Applied changes and their outcomes
-5. **Workflow Status**: Real-time progress updates through terminal chat
-
-## 🔒 Security & Safety
-
-### Safety Features
-- **User Confirmation**: Required for mutative operations
-- **Plan Review**: All changes reviewed before application
-- **Rollback Procedures**: Automatic backup and restore capabilities
-- **Error Handling**: Comprehensive error catching and reporting
-
-### Best Practices
-- Always review generated Terraform plans before applying
-- Test in non-production environments first
-- Keep backups of your original Terraform state files
-- Monitor AWS costs during remediation operations
-
-## 🧪 Example Terraform Setup
-
-Create a simple test setup in `./terraform/`:
-
-```hcl
-# terraform/main.tf
-provider "aws" {
-  region = "ap-southeast-2"
-}
-
-resource "aws_s3_bucket" "test_bucket" {
-  bucket = "my-terraform-test-bucket-${random_string.suffix.result}"
-}
-
-resource "random_string" "suffix" {
-  length  = 8
-  special = false
-  upper   = false
-}
-
-# terraform/outputs.tf
-output "bucket_name" {
-  value = aws_s3_bucket.test_bucket.id
-}
-```
-
-Initialize and apply:
-```bash
-cd terraform
-terraform init
-terraform plan
-terraform apply
-```
-
-## 🎭 Success Metrics
-
-- **Accurate drift detection** across all AWS resources
-- **Comprehensive analysis** of drift implications
-- **Safe and effective remediation** execution
-- **Seamless agent collaboration** through shared memory
-- **Intuitive terminal-based user experience**
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-1. **AWS Credentials**:
-   ```bash
-   aws sts get-caller-identity  # Test AWS access
-   ```
-
-2. **Terraform State Issues**:
-   ```bash
-   terraform refresh  # Sync state with actual resources
-   ```
-
-3. **Agent Communication**:
-   - Check shared memory contents with `memory` command
-   - Use `status` command to verify system health
-
-### Debug Mode
-
-Enable detailed logging:
-```bash
-export STRANDS_LOG_LEVEL=DEBUG
-python terraform_drift_system.py
-```
+For issues and feature requests:
+1. Check existing GitHub issues
+2. Review the documentation
+3. Create a new issue with detailed information
 
 ## 🤝 Contributing
 
