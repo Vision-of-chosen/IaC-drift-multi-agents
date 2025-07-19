@@ -66,6 +66,18 @@ class SharedMemory:
         """Get a connection to the SQLite database"""
         return sqlite3.connect(self.db_path)
     
+    def _execute_db_query(self, query, params=None):
+        """Execute a database query with proper connection management"""
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                if params:
+                    cursor.execute(query, params)
+                else:
+                    cursor.execute(query)
+                conn.commit()
+                return cursor
+    
     def _serialize_value(self, value: Any) -> tuple:
         """
         Serialize a value for storage in the database.
@@ -147,35 +159,26 @@ class SharedMemory:
         return key
     
     def set(self, key: str, value: Any, session_id: Optional[str] = None) -> None:
-        """
-        Set a value in shared memory.
-        
-        Args:
-            key: The key to store the value under
-            value: The value to store
-            session_id: Optional session ID (uses current session if not provided)
-        """
-        # Use provided session_id or current session_id
+        """Set a value in shared memory."""
+        # Use provided session_id directly instead of current session
+        # This avoids race conditions with set_session
         session = session_id or self._current_session_id
         
         if self.use_db:
             with self._lock:
-                conn = self._get_db_connection()
-                cursor = conn.cursor()
-                
-                serialized_value, value_type = self._serialize_value(value)
-                timestamp = datetime.now().isoformat()
-                
-                cursor.execute(
-                    "INSERT OR REPLACE INTO shared_memory (key, session_id, value, value_type, timestamp) VALUES (?, ?, ?, ?, ?)",
-                    (key, session or "", serialized_value, value_type, timestamp)
-                )
-                
-                conn.commit()
-                conn.close()
+                # Use context manager for database connection
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    serialized_value, value_type = self._serialize_value(value)
+                    timestamp = datetime.now().isoformat()
+                    
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO shared_memory (key, session_id, value, value_type, timestamp) VALUES (?, ?, ?, ?, ?)",
+                        (key, session or "", serialized_value, value_type, timestamp)
+                    )
+                    conn.commit()
         else:
             with self._lock:
-                # Use session-prefixed key for in-memory storage
                 prefixed_key = self._get_key_with_session(key, session)
                 self.data[prefixed_key] = value
     
