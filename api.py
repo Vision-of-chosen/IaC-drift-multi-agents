@@ -34,7 +34,7 @@ sys.path.append("tools/src")
 
 from strands.models.bedrock import BedrockModel
 from strands.multiagent.graph import GraphBuilder
-from agents import OrchestrationAgent, DetectAgent, DriftAnalyzerAgent, RemediateAgent, ReportAgent
+from agents import OrchestrationAgent, DetectAgent, DriftAnalyzerAgent, RemediateAgent, ReportAgent, NotificationAgent
 from shared_memory import shared_memory
 from config import BEDROCK_MODEL_ID, BEDROCK_REGION, TERRAFORM_DIR
 from permission_handlers import permission_manager
@@ -157,6 +157,7 @@ class ChatOrchestrator:
         drift_analyzer_agent = DriftAnalyzerAgent(self.model)
         remediate_agent = RemediateAgent(self.model)
         report_agent = ReportAgent(self.model)
+        notification_agent = NotificationAgent(self.model)
 
         # Build the agent graph using GraphBuilder
         builder = GraphBuilder()
@@ -167,6 +168,7 @@ class ChatOrchestrator:
         analyzer_node = builder.add_node(drift_analyzer_agent.get_agent(), "analyzer")
         remediate_node = builder.add_node(remediate_agent.get_agent(), "remediate")
         report_node = builder.add_node(report_agent.get_agent(), "report")
+        notification_node = builder.add_node(notification_agent.get_agent(), "notification")
 
         # Define the workflow edges - all agents connect directly to Orchestration Agent
         # Orchestration → DetectAgent
@@ -181,6 +183,9 @@ class ChatOrchestrator:
         # Orchestration → ReportAgent
         builder.add_edge(orchestration_node, report_node)
         
+        # Orchestration → NotificationAgent
+        builder.add_edge(orchestration_node, notification_node)
+        
         # Build the graph
         graph = builder.build()
         
@@ -189,7 +194,8 @@ class ChatOrchestrator:
             'detect': detect_agent, 
             'analyzer': drift_analyzer_agent,
             'remediate': remediate_agent,
-            'report': report_agent
+            'report': report_agent,
+            'notification': notification_agent
         }
         
         return graph, agents

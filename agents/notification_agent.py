@@ -74,6 +74,44 @@ class NotificationAgent:
         )
         return agent
     
+    def set_recipient_email(self, email: str) -> Dict[str, Any]:
+        """
+        Set the recipient email address for notifications.
+        
+        Args:
+            email: Email address to send notifications to
+            
+        Returns:
+            Dict with status and message
+        """
+        try:
+            # Validate email format (basic validation)
+            if '@' not in email or '.' not in email:
+                return {
+                    "status": "error",
+                    "message": f"Invalid email format: {email}"
+                }
+            
+            # Set the recipient email
+            self.recipient_email = email
+            
+            # Update shared memory
+            shared_memory.set("notification_recipient_email", email)
+            
+            logger.info(f"Notification recipient email set to: {email}")
+            
+            return {
+                "status": "success",
+                "message": f"Recipient email set to: {email}"
+            }
+        except Exception as e:
+            error_msg = f"Error setting recipient email: {str(e)}"
+            logger.error(error_msg)
+            return {
+                "status": "error",
+                "message": error_msg
+            }
+    
     def get_agent(self) -> Agent:
         """Get the configured agent instance."""
         return self.agent
@@ -107,7 +145,7 @@ class NotificationAgent:
         shared_memory.set(key, value)
         return {"status": "success", "message": f"Value set for key: {key}"}
     
-    def _setup_sns_topic(self, topic_name: str = "DriftNotificationTopic") -> Dict[str, Any]:
+    def _setup_sns_topic(self, topic_name: str = "DriftAlertTopic") -> Dict[str, Any]:
         """
         Set up an SNS topic for drift notifications and subscribe the recipient email.
         
@@ -163,6 +201,243 @@ class NotificationAgent:
             
         except ClientError as e:
             error_msg = f"Error setting up SNS topic: {str(e)}"
+            logger.error(error_msg)
+            return {
+                "status": "error",
+                "message": error_msg
+            }
+    
+    def _create_lambda_function(self) -> Dict[str, Any]:
+        """
+        Create a Lambda function to process EventBridge events and send notifications.
+        
+        Returns:
+            Dict with status and function ARN
+        """
+        try:
+            # Create Lambda client
+            lambda_client = boto3.client('lambda', region_name=self.aws_region)
+            
+            # Create IAM role for Lambda
+            iam_client = boto3.client('iam', region_name=self.aws_region)
+            
+            # Define role name
+            role_name = 'DriftDetectionLambdaRole'
+            
+            try:
+                # Try to get the role if it already exists
+                role_response = iam_client.get_role(RoleName=role_name)
+                role_arn = role_response['Role']['Arn']
+                logger.info(f"Using existing IAM role: {role_arn}")
+            except ClientError:
+                # Create the role if it doesn't exist
+                logger.info(f"Creating new IAM role: {role_name}")
+                
+                # Create trust relationship policy document
+                trust_policy = {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": "lambda.amazonaws.com"
+                            },
+                            "Action": "sts:AssumeRole"
+                        }
+                    ]
+                }
+                
+                # Create the role
+                role_response = iam_client.create_role(
+                    RoleName=role_name,
+                    AssumeRolePolicyDocument=json.dumps(trust_policy),
+                    Description='Role for Drift Detection Lambda function'
+                )
+                
+                role_arn = role_response['Role']['Arn']
+                
+                # Attach policies to the role
+                iam_client.attach_role_policy(
+                    RoleName=role_name,
+                    PolicyArn='arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+                )
+                
+                # Create and attach SNS publish policy
+                sns_policy = {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": "sns:Publish",
+                            "Resource": self.sns_topic_arn
+                        }
+                    ]
+                }
+                
+                sns_policy_response = iam_client.create_policy(
+                    PolicyName='DriftDetectionSNSPublishPolicy',
+                    PolicyDocument=json.dumps(sns_policy),
+                    Description='Allow Lambda to publish to SNS topic'
+                )
+                
+                iam_client.attach_role_policy(
+                    RoleName=role_name,
+                    PolicyArn=sns_policy_response['Policy']['Arn']
+                )
+                
+                # Wait for role to propagate
+                import time
+                time.sleep(10)
+            
+            # Define Lambda function code with single quotes
+            lambda_code = '''
+import json
+import logging
+import re
+import boto3
+from datetime import datetime, timedelta
+import textwrap
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+sns = boto3.client('sns')
+SNS_TOPIC_ARN = "{sns_topic_arn}"
+
+def is_drift_event(event_name):
+    return re.search(r'(Put|Delete|Modify|Create|Start|Stop|Run|Attach|Authorize|Terminate)', event_name, re.IGNORECASE)
+
+IGNORED_SOURCES = [
+    "logs.amazonaws.com",
+    "cloudtrail.amazonaws.com"
+]
+
+def lambda_handler(event, context):
+    detail = event.get("detail", {{}})
+    event_name = detail.get("eventName", "unknown")
+    source = detail.get("eventSource", "")
+    user = detail.get("userIdentity", {{}}).get("arn", "unknown")
+    
+    event_time_utc = detail.get("eventTime", datetime.utcnow().isoformat())
+    try:
+        event_time_vn = datetime.strptime(event_time_utc, "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=7)
+    except ValueError:
+        try:
+            event_time_vn = datetime.strptime(event_time_utc.split('.')[0], "%Y-%m-%dT%H:%M:%S") + timedelta(hours=7)
+        except:
+            event_time_vn = datetime.utcnow() + timedelta(hours=7)
+            
+    formatted_time = event_time_vn.strftime("%d/%m/%Y %H:%M:%S")
+
+    if is_drift_event(event_name) and source not in IGNORED_SOURCES:
+        logger.info(f"🚨 [DRIFT] Event: {{event_name}} by {{user}}")
+        logger.info("➡️ Chi tiết:")
+        logger.info(json.dumps(detail, indent=2))
+
+        message = f"""
+Xin chào Quản trị viên,
+
+Hệ thống vừa ghi nhận một thay đổi cấu hình trong môi trường AWS mà rất có thể gây ra tình trạng **Drift** – tức là cấu hình thực tế không còn đồng nhất với cấu hình chuẩn được quản lý bằng Terraform hoặc CloudFormation.
+
+🔹 THÔNG TIN CHI TIẾT:: 
+    - Sự kiện                   : {{event_name}}
+    - Tài nguyên liên quan      : IAM User
+    - Thời gian ghi nhận        : {{formatted_time}}
+    - Tài khoản thực hiện       : {{user}}
+    - Nguồn                     : {{source}}
+
+Những thay đổi này có thể ảnh hưởng đến độ ổn định, bảo mật hoặc khả năng khôi phục cấu hình hạ tầng.
+
+🔹 KHUYẾN NGHỊ:
+    - Kiểm tra lại các thay đổi đã diễn ra.
+    - So sánh với cấu hình chuẩn trong hệ thống quản lý hạ tầng (Infrastructure as Code).
+    - Thực hiện kiểm tra drift (drift detection) để xác định mức độ sai lệch.
+    - Liên hệ quản trị viên nếu thay đổi không được cho phép hoặc chưa được xác minh.
+
+🔹 HỖ TRỢ & TƯ VẤN:  
+    Để tìm hiểu thêm về cách sử dụng Terraform, kiểm tra Drift, và giải quyết các sự cố tương tự:
+
+    Truy cập: 👉 http://destroydrift.raiijino.buzz
+
+Tại đây, bạn có thể đặt câu hỏi, tham khảo tài liệu và nhận hỗ trợ hệ thống AI GeniDetect.
+
+Trân trọng,  
+GeniDetect
+"""
+        sns.publish(
+            TopicArn=SNS_TOPIC_ARN,
+            Subject=f"[CẢNH BÁO DRIFT] {{event_name}}",
+            Message=message
+        )
+        return {{
+            'statusCode': 200,
+            'body': json.dumps('Notification sent successfully')
+        }}
+    else:
+        logger.info(f"✅ Event '{{event_name}}' được bỏ qua (không gây drift hoặc thuộc source bị loại)")
+        return {{
+            'statusCode': 200,
+            'body': json.dumps('Event ignored - not a drift event or from ignored source')
+        }}
+'''.format(sns_topic_arn=self.sns_topic_arn)
+            
+            # Create a temporary zip file for the Lambda function
+            import tempfile
+            import zipfile
+            
+            with tempfile.NamedTemporaryFile(suffix='.zip') as temp_zip:
+                with zipfile.ZipFile(temp_zip.name, 'w') as zipf:
+                    zipf.writestr('lambda_function.py', lambda_code)
+                
+                # Read the zip file
+                with open(temp_zip.name, 'rb') as f:
+                    zip_bytes = f.read()
+            
+            # Create or update Lambda function
+            function_name = 'DriftDetectionFunction'
+            
+            try:
+                # Try to get the function if it exists
+                lambda_client.get_function(FunctionName=function_name)
+                
+                # Update the function if it exists
+                update_response = lambda_client.update_function_code(
+                    FunctionName=function_name,
+                    ZipFile=zip_bytes,
+                    Publish=True
+                )
+                
+                function_arn = update_response['FunctionArn']
+                logger.info(f"Updated Lambda function: {function_arn}")
+                
+            except ClientError:
+                # Create the function if it doesn't exist
+                create_response = lambda_client.create_function(
+                    FunctionName=function_name,
+                    Runtime='python3.9',
+                    Role=role_arn,
+                    Handler='lambda_function.lambda_handler',
+                    Code={'ZipFile': zip_bytes},
+                    Description='Process EventBridge events and send drift notifications',
+                    Timeout=30,
+                    MemorySize=128,
+                    Publish=True
+                )
+                
+                function_arn = create_response['FunctionArn']
+                logger.info(f"Created Lambda function: {function_arn}")
+            
+            # Store Lambda function ARN
+            shared_memory.set("notification_lambda_function_arn", function_arn)
+            
+            return {
+                "status": "success",
+                "message": f"Lambda function created/updated successfully",
+                "function_arn": function_arn
+            }
+            
+        except Exception as e:
+            error_msg = f"Error creating Lambda function: {str(e)}"
             logger.error(error_msg)
             return {
                 "status": "error",
@@ -231,58 +506,115 @@ class NotificationAgent:
             
             rule_arn = rule_response['RuleArn']
             
-            # Make sure SNS topic exists
-            if not self.sns_topic_arn:
-                sns_setup = self._setup_sns_topic()
-                if sns_setup["status"] != "success":
-                    return {
-                        "status": "error",
-                        "message": f"Failed to set up SNS topic: {sns_setup['message']}"
-                    }
+            # Create Lambda function for processing events
+            lambda_result = self._create_lambda_function()
+            if lambda_result["status"] != "success":
+                return {
+                    "status": "error",
+                    "message": f"Failed to create Lambda function: {lambda_result['message']}"
+                }
             
-            # Add SNS as target for the rule
+            lambda_function_arn = lambda_result["function_arn"]
+            
+            # Add Lambda as target for the rule
+            lambda_client = boto3.client('lambda', region_name=self.aws_region)
+            
+            # Add permission for EventBridge to invoke the Lambda function
+            try:
+                lambda_client.add_permission(
+                    FunctionName='DriftDetectionFunction',
+                    StatementId=f'EventBridge-{rule_name}',
+                    Action='lambda:InvokeFunction',
+                    Principal='events.amazonaws.com',
+                    SourceArn=rule_arn
+                )
+            except ClientError as e:
+                # If the permission already exists, continue
+                if 'ResourceConflictException' not in str(e):
+                    raise e
+            
+            # Add Lambda as target for the rule
             target_response = events_client.put_targets(
                 Rule=rule_name,
                 Targets=[
                     {
-                        'Id': 'DriftNotificationTarget',
-                        'Arn': self.sns_topic_arn,
-                        'InputTransformer': {
-                            'InputPathsMap': {
-                                'eventName': '$.detail.eventName',
-                                'eventSource': '$.detail.eventSource',
-                                'awsRegion': '$.detail.awsRegion',
-                                'eventTime': '$.detail.eventTime',
-                                'requestParameters': '$.detail.requestParameters',
-                                'responseElements': '$.detail.responseElements',
-                                'sourceIPAddress': '$.detail.sourceIPAddress'
-                            },
-                            'InputTemplate': """
-"AWS Infrastructure Change Detected - Potential Drift"
-
-Event: <eventName>
-Service: <eventSource>
-Region: <awsRegion>
-Time: <eventTime>
-Source IP: <sourceIPAddress>
-
-Request Parameters:
-<requestParameters>
-
-Response Elements:
-<responseElements>
-
-This change may indicate infrastructure drift. Please check your Terraform state.
-"""
-                        }
+                        'Id': 'DriftDetectionLambdaTarget',
+                        'Arn': lambda_function_arn
                     }
                 ]
             )
+            
+            # Create a separate rule for S3 events
+            s3_rule_name = f"{rule_name}-S3Events"
+            s3_event_pattern = {
+                "source": ["aws.s3"],
+                "detail-type": ["Object Created", "Object Deleted", "Object Restored", "Object Tagging"]
+            }
+            
+            s3_rule_response = events_client.put_rule(
+                Name=s3_rule_name,
+                EventPattern=json.dumps(s3_event_pattern),
+                State='ENABLED',
+                Description=f'Detect S3 object changes for drift notification'
+            )
+            
+            s3_rule_arn = s3_rule_response['RuleArn']
+            
+            # Add permission for EventBridge to invoke the Lambda function for S3 events
+            try:
+                lambda_client.add_permission(
+                    FunctionName='DriftDetectionFunction',
+                    StatementId=f'EventBridge-{s3_rule_name}',
+                    Action='lambda:InvokeFunction',
+                    Principal='events.amazonaws.com',
+                    SourceArn=s3_rule_arn
+                )
+            except ClientError as e:
+                # If the permission already exists, continue
+                if 'ResourceConflictException' not in str(e):
+                    raise e
+            
+            # Add Lambda as target for the S3 rule
+            s3_target_response = events_client.put_targets(
+                Rule=s3_rule_name,
+                Targets=[
+                    {
+                        'Id': 'S3DriftDetectionLambdaTarget',
+                        'Arn': lambda_function_arn
+                    }
+                ]
+            )
+            
+            # Enable S3 to send events to EventBridge for all buckets
+            s3_client = boto3.client('s3', region_name=self.aws_region)
+            
+            # Get list of all buckets
+            try:
+                response = s3_client.list_buckets()
+                buckets = [bucket['Name'] for bucket in response['Buckets']]
+                
+                # Enable EventBridge notifications for each bucket
+                for bucket in buckets:
+                    try:
+                        s3_client.put_bucket_notification_configuration(
+                            Bucket=bucket,
+                            NotificationConfiguration={
+                                'EventBridgeConfiguration': {}
+                            }
+                        )
+                        logger.info(f"Enabled EventBridge notifications for bucket: {bucket}")
+                    except ClientError as e:
+                        logger.warning(f"Could not enable EventBridge for bucket {bucket}: {e}")
+            except ClientError as e:
+                logger.warning(f"Could not list buckets: {e}")
             
             # Store rule info in shared memory
             shared_memory.set("notification_eventbridge_rule", {
                 "rule_name": rule_name,
                 "rule_arn": rule_arn,
+                "s3_rule_name": s3_rule_name,
+                "s3_rule_arn": s3_rule_arn,
+                "lambda_function_arn": lambda_function_arn,
                 "resource_types": resource_types,
                 "creation_time": datetime.now().isoformat()
             })
@@ -291,8 +623,10 @@ This change may indicate infrastructure drift. Please check your Terraform state
             
             return {
                 "status": "success",
-                "message": f"EventBridge rule '{rule_name}' created successfully",
+                "message": f"EventBridge rules and Lambda function created successfully",
                 "rule_arn": rule_arn,
+                "s3_rule_arn": s3_rule_arn,
+                "lambda_function_arn": lambda_function_arn,
                 "resource_types": resource_types
             }
             
@@ -304,188 +638,102 @@ This change may indicate infrastructure drift. Please check your Terraform state
                 "message": error_msg
             }
     
-    def _setup_aws_config(self, 
-                         recorder_name: Optional[str] = None,
-                         include_global_resources: bool = True) -> Dict[str, Any]:
+    def _setup_aws_config(self) -> Dict[str, Any]:
         """
-        Set up AWS Config for drift detection.
+        Set up AWS Config to record configuration changes.
         
-        Args:
-            recorder_name: Name of the Config recorder
-            include_global_resources: Whether to include global resources like IAM
-            
         Returns:
-            Dict with status and recorder details
+            Dict with status and message
         """
         try:
-            # Use provided recorder name or default
-            recorder_name = recorder_name or self.config_recorder_name
-            
             # Create Config client
             config_client = boto3.client('config', region_name=self.aws_region)
             
-            # Check if config recorder already exists
-            existing_recorders = config_client.describe_configuration_recorders()
+            # Define role name for Config
+            role_name = 'DriftConfigRole'
             
-            if existing_recorders['ConfigurationRecorders']:
-                recorder_exists = any(recorder['name'] == recorder_name 
-                                     for recorder in existing_recorders['ConfigurationRecorders'])
-                
-                if recorder_exists:
-                    logger.info(f"AWS Config recorder '{recorder_name}' already exists")
-                    
-                    # Make sure it's enabled
-                    config_client.start_configuration_recorder(
-                        ConfigurationRecorderName=recorder_name
-                    )
-                    
-                    return {
-                        "status": "success",
-                        "message": f"AWS Config recorder '{recorder_name}' already exists and is enabled",
-                        "recorder_name": recorder_name
-                    }
-            
-            # Create IAM role for AWS Config
-            iam_client = boto3.client('iam', region_name=self.aws_region)
-            
-            # Create role with trust relationship
             try:
-                role_response = iam_client.create_role(
-                    RoleName='AWSConfigRole',
-                    AssumeRolePolicyDocument=json.dumps({
-                        "Version": "2012-10-17",
-                        "Statement": [
-                            {
-                                "Effect": "Allow",
-                                "Principal": {
-                                    "Service": "config.amazonaws.com"
-                                },
-                                "Action": "sts:AssumeRole"
-                            }
-                        ]
-                    }),
-                    Description='IAM role for AWS Config'
-                )
-                
+                # Try to get the role if it already exists
+                iam_client = boto3.client('iam', region_name=self.aws_region)
+                role_response = iam_client.get_role(RoleName=role_name)
                 role_arn = role_response['Role']['Arn']
+                logger.info(f"Using existing IAM role: {role_arn}")
+            except ClientError:
+                # Create the role if it doesn't exist
+                logger.info(f"Creating new IAM role: {role_name}")
                 
-                # Attach AWS managed policy for Config
-                iam_client.attach_role_policy(
-                    RoleName='AWSConfigRole',
-                    PolicyArn='arn:aws:iam::aws:policy/service-role/AWS_ConfigRole'
-                )
-                
-            except ClientError as e:
-                if 'EntityAlreadyExists' in str(e):
-                    # Role already exists, get its ARN
-                    role_response = iam_client.get_role(RoleName='AWSConfigRole')
-                    role_arn = role_response['Role']['Arn']
-                else:
-                    raise e
-            
-            # Create S3 bucket for Config recordings if needed
-            s3_client = boto3.client('s3', region_name=self.aws_region)
-            bucket_name = f"aws-config-recordings-{self.aws_region}-{datetime.now().strftime('%Y%m%d')}"
-            
-            try:
-                s3_client.create_bucket(
-                    Bucket=bucket_name,
-                    CreateBucketConfiguration={
-                        'LocationConstraint': self.aws_region
-                    }
-                )
-                
-                # Add bucket policy
-                bucket_policy = {
+                # Create trust relationship policy document
+                trust_policy = {
                     "Version": "2012-10-17",
                     "Statement": [
                         {
-                            "Sid": "AWSConfigBucketPermissionsCheck",
                             "Effect": "Allow",
                             "Principal": {
                                 "Service": "config.amazonaws.com"
                             },
-                            "Action": "s3:GetBucketAcl",
-                            "Resource": f"arn:aws:s3:::{bucket_name}"
-                        },
-                        {
-                            "Sid": "AWSConfigBucketDelivery",
-                            "Effect": "Allow",
-                            "Principal": {
-                                "Service": "config.amazonaws.com"
-                            },
-                            "Action": "s3:PutObject",
-                            "Resource": f"arn:aws:s3:::{bucket_name}/AWSLogs/*"
+                            "Action": "sts:AssumeRole"
                         }
                     ]
                 }
                 
-                s3_client.put_bucket_policy(
-                    Bucket=bucket_name,
-                    Policy=json.dumps(bucket_policy)
+                # Create the role
+                role_response = iam_client.create_role(
+                    RoleName=role_name,
+                    AssumeRolePolicyDocument=json.dumps(trust_policy),
+                    Description='Role for AWS Config to record configuration changes'
                 )
                 
-            except ClientError as e:
-                if 'BucketAlreadyExists' in str(e) or 'BucketAlreadyOwnedByYou' in str(e):
-                    # Try another bucket name with random suffix
-                    import uuid
-                    bucket_name = f"aws-config-recordings-{self.aws_region}-{uuid.uuid4().hex[:8]}"
-                    
-                    s3_client.create_bucket(
-                        Bucket=bucket_name,
-                        CreateBucketConfiguration={
-                            'LocationConstraint': self.aws_region
-                        }
-                    )
-                else:
-                    # Use default bucket if creation fails
-                    bucket_name = f"config-bucket-{self.aws_region}"
+                role_arn = role_response['Role']['Arn']
+                
+                # Attach policies to the role
+                iam_client.attach_role_policy(
+                    RoleName=role_name,
+                    PolicyArn='arn:aws:iam::aws:policy/service-role/AWSConfigRole'
+                )
+                
+                # Wait for role to propagate
+                import time
+                time.sleep(10)
             
-            # Create delivery channel
-            delivery_channel_response = config_client.put_delivery_channel(
-                DeliveryChannel={
-                    'name': 'default',
-                    's3BucketName': bucket_name,
-                    'configSnapshotDeliveryProperties': {
-                        'deliveryFrequency': 'Six_Hours'
+            # Create Config recorder
+            recorder_name = self.config_recorder_name
+            
+            try:
+                # Try to get the recorder if it already exists
+                config_client.get_configuration_recorder(Name=recorder_name)
+                logger.info(f"Config recorder '{recorder_name}' already exists.")
+            except ClientError:
+                # Create the recorder if it doesn't exist
+                logger.info(f"Creating new Config recorder: {recorder_name}")
+                
+                # Define recorder configuration
+                recorder_config = {
+                    "name": recorder_name,
+                    "roleARN": role_arn,
+                    "recordingGroup": {
+                        "allSupported": True,
+                        "includeGlobalResourceTypes": True,
+                        "resourceTypes": resource_types
                     }
                 }
-            )
+                
+                config_client.put_configuration_recorder(
+                    ConfigurationRecorder=recorder_config
+                )
+                
+                # Start recording
+                config_client.start_configuration_recorder(
+                    ConfigurationRecorderName=recorder_name
+                )
+                
+                logger.info(f"Config recorder '{recorder_name}' created and started.")
             
-            # Create configuration recorder
-            recorder_response = config_client.put_configuration_recorder(
-                ConfigurationRecorder={
-                    'name': recorder_name,
-                    'roleARN': role_arn,
-                    'recordingGroup': {
-                        'allSupported': True,
-                        'includeGlobalResourceTypes': include_global_resources
-                    }
-                }
-            )
-            
-            # Start the configuration recorder
-            config_client.start_configuration_recorder(
-                ConfigurationRecorderName=recorder_name
-            )
-            
-            # Store config info in shared memory
-            shared_memory.set("notification_aws_config", {
-                "recorder_name": recorder_name,
-                "role_arn": role_arn,
-                "bucket_name": bucket_name,
-                "include_global_resources": include_global_resources,
-                "creation_time": datetime.now().isoformat()
-            })
-            
-            logger.info(f"AWS Config recorder '{recorder_name}' created and started")
+            # Store recorder ARN in shared memory
+            shared_memory.set("notification_config_recorder_arn", role_arn)
             
             return {
                 "status": "success",
-                "message": f"AWS Config recorder '{recorder_name}' created and started successfully",
-                "recorder_name": recorder_name,
-                "role_arn": role_arn,
-                "bucket_name": bucket_name
+                "message": f"AWS Config recorder '{recorder_name}' set up successfully."
             }
             
         except ClientError as e:
@@ -496,64 +744,30 @@ This change may indicate infrastructure drift. Please check your Terraform state
                 "message": error_msg
             }
     
-    def _send_test_notification(self, subject: Optional[str] = None, message: Optional[str] = None) -> Dict[str, Any]:
+    def _send_test_notification(self) -> Dict[str, Any]:
         """
-        Send a test notification through SNS.
+        Send a test notification to verify the notification system.
         
-        Args:
-            subject: Custom subject for the notification
-            message: Custom message for the notification
-            
         Returns:
-            Dict with status and message ID
+            Dict with status and message
         """
         try:
-            # Make sure SNS topic exists
-            if not self.sns_topic_arn:
-                sns_setup = self._setup_sns_topic()
-                if sns_setup["status"] != "success":
-                    return {
-                        "status": "error",
-                        "message": f"Failed to set up SNS topic: {sns_setup['message']}"
-                    }
-            
             # Create SNS client
             sns_client = boto3.client('sns', region_name=self.aws_region)
             
-            # Default subject and message if not provided
-            if not subject:
-                subject = "AWS Drift Monitoring - Test Notification"
-                
-            if not message:
-                message = f"""
-This is a test notification from the AWS Drift Monitoring System.
-
-Monitoring is active and working correctly.
-Recipient: {self.recipient_email}
-Time: {datetime.now().isoformat()}
-
-The system is configured to notify you of any infrastructure changes that might indicate drift.
-"""
-            
-            # Send the notification
+            # Publish a test message to the SNS topic
+            test_message = "This is a test notification from the Drift Detection System."
             response = sns_client.publish(
                 TopicArn=self.sns_topic_arn,
-                Message=message,
-                Subject=subject
+                Subject="Test Drift Notification",
+                Message=test_message
             )
             
-            message_id = response['MessageId']
-            
-            # Log success and update shared memory
-            logger.info(f"Test notification sent successfully, Message ID: {message_id}")
-            shared_memory.set("last_notification_sent", datetime.now().isoformat())
-            shared_memory.set("last_notification_subject", subject)
+            logger.info(f"Test notification sent. Message ID: {response['MessageId']}")
             
             return {
                 "status": "success",
-                "message": "Test notification sent successfully",
-                "message_id": message_id,
-                "recipient": self.recipient_email
+                "message": "Test notification sent successfully."
             }
             
         except ClientError as e:
@@ -566,59 +780,34 @@ The system is configured to notify you of any infrastructure changes that might 
     
     def _check_notification_status(self) -> Dict[str, Any]:
         """
-        Check the status of the notification setup.
+        Check the status of the notification system components.
         
         Returns:
-            Dict with status details
+            Dict with status and overall status
         """
         try:
-            status = {
-                "timestamp": datetime.now().isoformat(),
-                "components": {}
-            }
+            # Create clients for status checks
+            sns_client = boto3.client('sns', region_name=self.aws_region)
+            events_client = boto3.client('events', region_name=self.aws_region)
+            config_client = boto3.client('config', region_name=self.aws_region)
             
-            # Check SNS topic
-            if self.sns_topic_arn:
-                sns_client = boto3.client('sns', region_name=self.aws_region)
-                
-                try:
-                    # Get topic attributes
-                    topic_attributes = sns_client.get_topic_attributes(
-                        TopicArn=self.sns_topic_arn
-                    )
-                    
-                    # Get subscriptions
-                    subscriptions = sns_client.list_subscriptions_by_topic(
-                        TopicArn=self.sns_topic_arn
-                    )
-                    
-                    status["components"]["sns"] = {
-                        "status": "active",
-                        "topic_arn": self.sns_topic_arn,
-                        "subscriptions": [
-                            {
-                                "endpoint": sub["Endpoint"],
-                                "protocol": sub["Protocol"],
-                                "status": sub.get("SubscriptionArn", "PendingConfirmation")
-                            }
-                            for sub in subscriptions.get("Subscriptions", [])
-                        ]
-                    }
-                    
-                except ClientError:
-                    status["components"]["sns"] = {
-                        "status": "error",
-                        "message": "SNS topic exists but could not retrieve details"
-                    }
-            else:
+            status = {"components": {}}
+            
+            # Check SNS
+            try:
+                sns_client.get_topic_attributes(TopicArn=self.sns_topic_arn)
+                status["components"]["sns"] = {
+                    "status": "active",
+                    "topic_arn": self.sns_topic_arn,
+                    "subscription_arn": shared_memory.get("notification_sns_subscription_arn", "N/A")
+                }
+            except ClientError:
                 status["components"]["sns"] = {
                     "status": "not_configured",
                     "message": "SNS topic not set up"
                 }
             
-            # Check EventBridge rule
-            events_client = boto3.client('events', region_name=self.aws_region)
-            
+            # Check EventBridge
             try:
                 rule_info = events_client.describe_rule(
                     Name=self.eventbridge_rule_name
@@ -649,8 +838,6 @@ The system is configured to notify you of any infrastructure changes that might 
                 }
             
             # Check AWS Config
-            config_client = boto3.client('config', region_name=self.aws_region)
-            
             try:
                 config_recorders = config_client.describe_configuration_recorders()
                 recorder_status = config_client.describe_configuration_recorder_status()
@@ -714,67 +901,7 @@ The system is configured to notify you of any infrastructure changes that might 
                 "message": error_msg
             }
     
-    def set_recipient_email(self, email: str) -> Dict[str, Any]:
-        """
-        Set the recipient email address for notifications.
-        
-        Args:
-            email: Email address to send notifications to
-            
-        Returns:
-            Dict with status and message
-        """
-        try:
-            # Basic email validation
-            if '@' not in email or '.' not in email:
-                return {
-                    "status": "error",
-                    "message": f"Invalid email format: {email}"
-                }
-            
-            # Update recipient email
-            self.recipient_email = email
-            shared_memory.set("notification_recipient_email", email)
-            
-            # If SNS topic exists, update subscription
-            if self.sns_topic_arn:
-                sns_client = boto3.client('sns', region_name=self.aws_region)
-                
-                # List existing subscriptions
-                subscriptions = sns_client.list_subscriptions_by_topic(
-                    TopicArn=self.sns_topic_arn
-                )
-                
-                # Check if email is already subscribed
-                email_already_subscribed = any(
-                    sub["Endpoint"] == email and sub["Protocol"] == "email"
-                    for sub in subscriptions.get("Subscriptions", [])
-                )
-                
-                if not email_already_subscribed:
-                    # Subscribe new email
-                    subscription_response = sns_client.subscribe(
-                        TopicArn=self.sns_topic_arn,
-                        Protocol='email',
-                        Endpoint=email
-                    )
-                    
-                    logger.info(f"New email subscription created: {subscription_response['SubscriptionArn']}")
-            
-            return {
-                "status": "success",
-                "message": f"Notification recipient email set to {email}"
-            }
-            
-        except Exception as e:
-            error_msg = f"Error setting recipient email: {str(e)}"
-            logger.error(error_msg)
-            return {
-                "status": "error",
-                "message": error_msg
-            }
-    
-    def start_continuous_monitoring(self, interval_minutes: int = 15) -> Dict[str, Any]:
+    def start_continuous_monitoring(self, interval_minutes: int = 1) -> Dict[str, Any]:
         """
         Start continuous monitoring of AWS infrastructure changes using AWS-native services.
         
