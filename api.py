@@ -14,7 +14,7 @@ Architecture:
 import logging
 import os
 import sys
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 import uuid
 import glob
@@ -115,6 +115,13 @@ class SystemStatus(BaseModel):
     system_health: str
     terraform_dir: str
 
+
+class NotificationConfig(BaseModel):
+    recipient_email: str = Field(..., description="Email address to send notifications to")
+    interval_minutes: int = Field(15, description="Interval in minutes between monitoring checks (legacy parameter)")
+    resource_types: Optional[List[str]] = Field(None, description="List of AWS resource types to monitor")
+    setup_aws_config: bool = Field(True, description="Whether to set up AWS Config for drift detection")
+    include_global_resources: bool = Field(True, description="Whether to include global resources like IAM in AWS Config")
 
 # Chat-based Orchestrator Class
 class ChatOrchestrator:
@@ -1022,6 +1029,141 @@ async def upload_terraform_file(file: UploadFile = File(...)):
         raise HTTPException(
             status_code=500, 
             detail=f"Failed to upload and process terraform file: {str(e)}"
+        )
+
+@app.post("/setup-notifications", summary="Setup Email Notifications for AWS Changes")
+async def setup_notifications(config: NotificationConfig):
+    """
+    Configure email notifications for AWS infrastructure changes using AWS-native services.
+    
+    This endpoint:
+    1. Sets up an SNS topic and subscribes the specified email
+    2. Creates EventBridge rules to monitor infrastructure changes
+    3. Optionally sets up AWS Config for drift detection
+    4. Returns the monitoring configuration and setup results
+    """
+    try:
+        # Access the notification agent
+        notification_agent = orchestrator.agents.get('notification')
+        if not notification_agent:
+            raise HTTPException(status_code=404, detail="Notification agent not available")
+        
+        # Set recipient email
+        email_result = notification_agent.set_recipient_email(config.recipient_email)
+        if email_result.get("status") != "success":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to set recipient email: {email_result.get('message')}"
+            )
+        
+        # Store configuration in shared memory
+        shared_memory.set("notification_config", {
+            "recipient_email": config.recipient_email,
+            "resource_types": config.resource_types,
+            "setup_aws_config": config.setup_aws_config,
+            "include_global_resources": config.include_global_resources,
+            "setup_time": datetime.now().isoformat()
+        })
+        
+        # Start monitoring with AWS-native services
+        monitoring_result = notification_agent.start_continuous_monitoring()
+        
+        return {
+            "message": f"AWS-native notification monitoring setup successfully for {config.recipient_email}",
+            "resource_types": config.resource_types or "All critical resources",
+            "aws_config_enabled": config.setup_aws_config,
+            "monitoring_status": monitoring_result,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error setting up notifications: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to setup notifications: {str(e)}"
+        )
+
+@app.get("/notification-status", summary="Get Notification Monitoring Status")
+async def get_notification_status():
+    """
+    Get the current status of AWS-native notification monitoring.
+    """
+    try:
+        # Access the notification agent
+        notification_agent = orchestrator.agents.get('notification')
+        if not notification_agent:
+            raise HTTPException(status_code=404, detail="Notification agent not available")
+            
+        # Get notification status
+        status_result = notification_agent._check_notification_status()
+        if status_result.get("status") != "success":
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to check notification status: {status_result.get('message')}"
+            )
+            
+        # Get notification configuration from shared memory
+        notification_config = shared_memory.get("notification_config", {})
+        monitoring_active = shared_memory.get("notification_monitoring_active", False)
+        last_notification = shared_memory.get("last_notification_sent")
+        
+        return {
+            "monitoring_active": monitoring_active,
+            "recipient_email": notification_config.get("recipient_email"),
+            "resource_types": notification_config.get("resource_types"),
+            "setup_time": notification_config.get("setup_time"),
+            "last_notification_sent": last_notification,
+            "system_status": status_result.get("notification_system", {}),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting notification status: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get notification status: {str(e)}"
+        )
+
+@app.post("/run-notification-check", summary="Send Test Notification")
+async def run_notification_check(custom_message: Optional[str] = None):
+    """
+    Send a test notification through the AWS-native notification system.
+    
+    Args:
+        custom_message: Optional custom message for the test notification
+    """
+    try:
+        # Access the notification agent
+        notification_agent = orchestrator.agents.get('notification')
+        if not notification_agent:
+            raise HTTPException(status_code=404, detail="Notification agent not available")
+        
+        # Send test notification
+        subject = "AWS Drift Monitoring - Test Notification"
+        message = custom_message or "This is a test notification from the AWS Drift Monitoring System."
+        
+        notification_result = notification_agent._send_test_notification(
+            subject=subject,
+            message=message
+        )
+        
+        if notification_result.get("status") != "success":
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to send test notification: {notification_result.get('message')}"
+            )
+        
+        return {
+            "message": "Test notification sent successfully",
+            "notification_result": notification_result,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error sending test notification: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to send test notification: {str(e)}"
         )
 
 if __name__ == "__main__":
