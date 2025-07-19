@@ -628,7 +628,41 @@ async def generate_report():
         logger.error(f"Error generating report: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate report: {e}")
 
+class AWSCredentials(BaseModel):
+    access_key: str = Field(..., description="AWS Access Key ID")
+    secret_key: str = Field(..., description="AWS Secret Access Key")
+    region: str = Field("ap-southeast-2", description="AWS Region")
 
+@app.post("/aws-credentials", summary="Get AWS Credentials Export Commands")
+async def get_aws_credentials(credentials: AWSCredentials):
+    """
+    Accept AWS credentials and return them in export command format.
+    
+    Args:
+        credentials: AWS credentials (access key, secret key, region)
+        
+    Returns:
+        Dict with AWS credentials export commands
+    """
+    try:
+        # Format credentials as export commands
+        export_commands = {
+            "export_commands": f"export AWS_ACCESS_KEY_ID={credentials.access_key}\nexport AWS_SECRET_ACCESS_KEY={credentials.secret_key}\nexport AWS_REGION={credentials.region}",
+            "access_key": credentials.access_key,
+            "secret_key": credentials.secret_key,
+            "region": credentials.region,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        return export_commands
+        
+    except Exception as e:
+        logger.error(f"Error processing AWS credentials: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to process AWS credentials: {str(e)}"
+        )
+        
 @app.get("/terraform-status", summary="Get Terraform Files Status")
 async def get_terraform_status():
     """Get information about Terraform files in the working directory"""
