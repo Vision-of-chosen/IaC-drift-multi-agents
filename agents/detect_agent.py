@@ -20,10 +20,16 @@ sys.path.append(useful_tools_path)
 
 logger = logging.getLogger(__name__)
 
-from strands import Agent
+from strands import Agent, tool
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
-from strands_tools import use_aws
+# Try to import our wrapped use_aws first, fall back to original if not available
+try:
+    from useful_tools.aws_wrapper import use_aws
+    logger.info("Using wrapped use_aws tool from useful_tools.aws_wrapper")
+except ImportError:
+    from strands_tools import use_aws
+    logger.warning("Using original use_aws tool from strands_tools")
 from datetime import datetime
 from useful_tools import cloudtrail_logs
 from useful_tools import cloudwatch_logs
@@ -70,6 +76,39 @@ from prompts import AgentPrompts
 from shared_memory import shared_memory
 from config import BEDROCK_REGION
 from permission_handlers import create_agent_callback_handler
+from typing import Dict, Any, Optional
+
+# Define the use_aws_with_session tool outside the class with the @tool decorator
+@tool
+def use_aws_with_session(
+    service_name: str,
+    operation_name: str,
+    parameters: Dict[str, Any], 
+    region: Optional[str] = None,
+    label: Optional[str] = None, 
+    profile_name: Optional[str] = None
+):
+    """Wrapper for use_aws that includes the session key"""
+    session_id = shared_memory.get_current_session()
+    session_key = f"detection_{session_id}" if session_id else None
+    # Use the region from the agent if not provided
+    if not region:
+        region = os.environ.get("AWS_REGION", BEDROCK_REGION)
+    
+    # Convert operation name from hyphen format to underscore format
+    # For example: 'describe-instances' -> 'describe_instances'
+    if '-' in operation_name:
+        operation_name = operation_name.replace('-', '_')
+        
+    return use_aws(
+        service_name=service_name,
+        operation_name=operation_name,
+        parameters=parameters,
+        region=region,
+        label=label,
+        profile_name=profile_name,
+        session_key=session_key
+    )
 
 class DetectAgent:
     """Specialist in detecting Terraform infrastructure drift"""
@@ -83,9 +122,9 @@ class DetectAgent:
         """Create the detect agent instance"""
         # Create tools list based on availability of read_tfstate
         if read_tfstate:
-            tools = [use_aws, cloudtrail_logs, cloudwatch_logs, read_tfstate, terraform_plan]
+            tools = [use_aws_with_session, read_tfstate, terraform_plan]
         else:
-            tools = [use_aws, cloudtrail_logs, cloudwatch_logs, terraform_plan]
+            tools = [use_aws_with_session, terraform_plan]
         
         agent = Agent(
             model=self.model,
@@ -111,12 +150,22 @@ class DetectAgent:
         # Create a new state object with updated shared memory
         if hasattr(self.agent, 'state'):
             self.agent.state.shared_memory = shared_memory.data
+            
+            # Add session key to state if available
+            session_id = shared_memory.get_current_session()
+            if session_id:
+                session_key = f"detection_{session_id}"
+                self.agent.state.aws_session_key = session_key
         else:
+            session_id = shared_memory.get_current_session()
+            session_key = f"detection_{session_id}" if session_id else None
+            
             self.agent.state = AgentState({
-            "shared_memory": shared_memory.data,
-            "agent_type": "detection",
-            "aws_region": self.region  # Preserve the AWS region in state updates
-        })
+                "shared_memory": shared_memory.data,
+                "agent_type": "detection",
+                "aws_region": self.region,  # Preserve the AWS region in state updates
+                "aws_session_key": session_key
+            })
     
     def read_terraform_state(self, file_path=None) -> dict:
         """

@@ -141,6 +141,15 @@ class SharedMemory:
             The current session ID or None if not set
         """
         return self._current_session_id
+        
+    def get_current_session(self) -> Optional[str]:
+        """
+        Get the current session ID.
+        
+        Returns:
+            The current session ID or None if not set
+        """
+        return self._current_session_id
     
     def _get_key_with_session(self, key: str, session_id: Optional[str] = None) -> str:
         """

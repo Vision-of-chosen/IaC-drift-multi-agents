@@ -14,11 +14,18 @@ sys.path.append("tools/src")
 
 logger = logging.getLogger(__name__)
 
-from strands import Agent
+from strands import Agent, tool
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
+# Try to import our wrapped use_aws first, fall back to original if not available
+try:
+    from useful_tools.aws_wrapper import use_aws
+    logger.info("Using wrapped use_aws tool from useful_tools.aws_wrapper")
+except ImportError:
+    from strands_tools import file_read, file_write, journal, calculator, use_aws
 
-from strands_tools import file_read, file_write, journal, calculator, use_aws
+    logger.warning("Using original use_aws tool from strands_tools")
+from strands_tools import file_read, file_write, journal, calculator
 from datetime import datetime
 # Import additional useful tools for comprehensive drift detection
 from useful_tools import cloudtrail_logs
@@ -29,6 +36,72 @@ from prompts import AgentPrompts
 from shared_memory import shared_memory
 from config import BEDROCK_REGION
 from permission_handlers import create_agent_callback_handler
+from typing import Dict, Any, Optional
+
+# Define the use_aws_with_session tool outside the class with the @tool decorator
+@tool
+def use_aws_with_session(
+    service_name: str,
+    operation_name: str,
+    parameters: Dict[str, Any], 
+    region: Optional[str] = None,
+    label: Optional[str] = None, 
+    profile_name: Optional[str] = None
+):
+    """Wrapper for use_aws that includes the session key"""
+    session_id = shared_memory.get_current_session()
+    session_key = f"orchestration_{session_id}" if session_id else None
+    # Use the region from environment if not provided
+    if not region:
+        region = os.environ.get("AWS_REGION", BEDROCK_REGION)
+    
+    # Log the session key being used
+    logger.info(f"Using session key in use_aws_with_session: {session_key}")
+    
+    # Convert operation name from hyphen format to underscore format
+    # For example: 'describe-instances' -> 'describe_instances'
+    if '-' in operation_name:
+        operation_name = operation_name.replace('-', '_')
+    
+    # Check if the session key exists in aws_wrapper
+    try:
+        from useful_tools.aws_wrapper import _boto3_sessions
+        available_sessions = list(_boto3_sessions.keys())
+        logger.info(f"Available boto3 sessions before AWS call: {available_sessions}")
+        
+        if session_key and session_key not in available_sessions:
+            logger.warning(f"Session key {session_key} not found in available boto3 sessions")
+            
+            # Try to get user_id from shared memory
+            user_id = shared_memory.get("current_user_id", session_id=session_id)
+            if user_id:
+                logger.info(f"Attempting to recreate boto3 session for user_id: {user_id}")
+                
+                # Import the function to create and register boto3 session
+                try:
+                    # Import from parent directory
+                    import sys
+                    import os
+                    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                    from api import create_and_register_boto3_session
+                    
+                    # Create and register boto3 session
+                    create_and_register_boto3_session(user_id, "orchestration", session_id)
+                    logger.info(f"Recreated boto3 session for {session_key}")
+                except ImportError as e:
+                    logger.error(f"Could not import create_and_register_boto3_session: {e}")
+    except ImportError:
+        logger.warning("Could not import aws_wrapper to check available sessions")
+    
+    return use_aws(
+        service_name=service_name,
+        operation_name=operation_name,
+        parameters=parameters,
+        region=region,
+        label=label,
+        profile_name=profile_name,
+        session_key=session_key
+    )
 
 class OrchestrationAgent:
     """Central coordinator for the multi-agent system"""
@@ -51,9 +124,7 @@ class OrchestrationAgent:
                 file_write,
                 journal,
                 calculator,
-                use_aws,
-                cloudtrail_logs,
-                cloudwatch_logs
+                use_aws_with_session
             ]
         )
         
@@ -71,15 +142,63 @@ class OrchestrationAgent:
     
     def update_shared_memory(self) -> None:
         """Update agent state with current shared memory"""
+        # Get current session ID
+        session_id = shared_memory.get_current_session()
+        
+        # Create session key
+        session_key = f"orchestration_{session_id}" if session_id else None
+        
+        # Log the session information
+        logger.info(f"Updating shared memory for session ID: {session_id}, session key: {session_key}")
+        
+        # Check if the session key exists in aws_wrapper
+        try:
+            from useful_tools.aws_wrapper import _boto3_sessions
+            available_sessions = list(_boto3_sessions.keys())
+            logger.info(f"Available boto3 sessions: {available_sessions}")
+            
+            if session_key and session_key not in available_sessions:
+                logger.warning(f"Session key {session_key} not found in available boto3 sessions")
+                
+                # Try to get user_id from shared memory
+                user_id = shared_memory.get("current_user_id", session_id=session_id)
+                if user_id:
+                    logger.info(f"Attempting to recreate boto3 session for user_id: {user_id}")
+                    
+                    # Import the function to create and register boto3 session
+                    try:
+                        # Import from parent directory
+                        import sys
+                        import os
+                        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                        from api import create_and_register_boto3_session
+                        
+                        # Create and register boto3 session
+                        create_and_register_boto3_session(user_id, "orchestration", session_id)
+                        logger.info(f"Recreated boto3 session for {session_key}")
+                    except ImportError as e:
+                        logger.error(f"Could not import create_and_register_boto3_session: {e}")
+        except ImportError:
+            logger.warning("Could not import aws_wrapper to check available sessions")
+        
         # Create a new state object with updated shared memory
         if hasattr(self.agent, 'state'):
             self.agent.state.shared_memory = shared_memory.data
+            
+            # Add session key to state if available
+            if session_id:
+                self.agent.state.aws_session_key = session_key
+                logger.info(f"Updated agent state with aws_session_key: {session_key}")
         else:
             self.agent.state = AgentState({
-            "shared_memory": shared_memory.data,
-            "agent_type": "orchestration",
-            "aws_region": self.region
-        })
+                "shared_memory": shared_memory.data,
+                "agent_type": "orchestration",
+                "aws_region": self.region,
+                "aws_session_key": session_key
+            })
+            
+            if session_key:
+                logger.info(f"Created new agent state with aws_session_key: {session_key}")
         
     def _set_shared_memory_wrapper(self, key, value):
         """

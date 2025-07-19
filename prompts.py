@@ -120,7 +120,7 @@ AGENT INTEGRATION:
 
 TECHNICAL CAPABILITIES:
 - Expert knowledge of Terraform state file formats
-- Ability to query AWS resources using the provided tools like use_aws, cloudtrail_logs, cloudwatch_logs
+- Ability to query AWS resources using the provided tools like use_aws_with_session, cloudtrail_logs, cloudwatch_logs
 - Proficiency in comparing AWS resource with terraform state to identifying differences
 - Deep understanding of AWS resource configurations
 - Proficiency in identifying configuration drift

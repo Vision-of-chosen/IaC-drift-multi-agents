@@ -13,23 +13,17 @@ sys.path.append("tools/src")
 
 logger = logging.getLogger(__name__)
 from datetime import datetime
-from strands import Agent
+from strands import Agent, tool
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
-from strands_tools import use_aws, file_read, file_write, editor
-
+# Try to import our wrapped use_aws first, fall back to original if not available
 try:
-    from useful_tools.terraform_mcp_tool import (
-        terraform_run_command,
-        terraform_run_checkov_scan,
-        terraform_get_best_practices,
-        terraform_get_provider_docs
-    )
-    TERRAFORM_MCP_TOOLS_AVAILABLE = True
+    from useful_tools.aws_wrapper import use_aws
+    logger.info("Using wrapped use_aws tool from useful_tools.aws_wrapper")
 except ImportError:
-    logger.warning("terraform_mcp_tool not available, some functionality will be limited")
-    TERRAFORM_MCP_TOOLS_AVAILABLE = False
-
+    from strands_tools import use_aws, file_read, file_write, editor
+    logger.warning("Using original use_aws tool from strands_tools")
+from strands_tools import  file_read, file_write, editor
 from useful_tools.terraform_tools import (
     terraform_plan,
     terraform_apply,
@@ -40,6 +34,40 @@ from prompts import AgentPrompts
 from shared_memory import shared_memory
 from config import BEDROCK_REGION, TERRAFORM_DIR
 from permission_handlers import create_agent_callback_handler
+from typing import Dict, Any, Optional
+
+# Define the use_aws_with_session tool outside the class with the @tool decorator
+@tool
+def use_aws_with_session(
+    service_name: str,
+    operation_name: str,
+    parameters: Dict[str, Any], 
+    region: Optional[str] = None,
+    label: Optional[str] = None, 
+    profile_name: Optional[str] = None
+):
+    """Wrapper for use_aws that includes the session key"""
+    session_id = shared_memory.get_current_session()
+    session_key = f"remediate_{session_id}" if session_id else None
+    # Use the region from environment if not provided
+    if not region:
+        region = os.environ.get("AWS_REGION", BEDROCK_REGION)
+    
+    # Convert operation name from hyphen format to underscore format
+    # For example: 'describe-instances' -> 'describe_instances'
+    if '-' in operation_name:
+        operation_name = operation_name.replace('-', '_')
+        
+    return use_aws(
+        service_name=service_name,
+        operation_name=operation_name,
+        parameters=parameters,
+        region=region,
+        label=label,
+        profile_name=profile_name,
+        session_key=session_key
+    )
+
 class RemediateAgent:
     """Specialist in automated Terraform infrastructure remediation"""
     
@@ -50,31 +78,15 @@ class RemediateAgent:
         
     def _create_agent(self) -> Agent:
         """Create the remediate agent instance"""
-        # Define tools based on availability
-        if TERRAFORM_MCP_TOOLS_AVAILABLE:
-            logger.info("Terraform MCP tools added to RemediateAgent")
-            # Create a combined list of all tools
-            tools = [
-                use_aws, 
-                file_read, 
-                file_write, 
-                editor,
-                terraform_run_command,
-                terraform_run_checkov_scan,
-                terraform_get_best_practices,
-                terraform_get_provider_docs,
-                terraform_plan,
-                terraform_apply,
-                terraform_import
-            ]
-        else:
-            # Basic tools only
-            tools = [
-                use_aws, 
-                file_read, 
-                file_write, 
-                editor
-            ]
+        # Determine available tools
+        tools = [
+            use_aws_with_session,
+            file_read,
+            file_write,
+            editor,
+            terraform_plan,
+            terraform_apply
+        ]
         
         agent = Agent(
             model=self.model,
@@ -96,14 +108,26 @@ class RemediateAgent:
     
     def update_shared_memory(self) -> None:
         """Update agent state with current shared memory"""
+        # Create a new state object with updated shared memory
         if hasattr(self.agent, 'state'):
             self.agent.state.shared_memory = shared_memory.data
+            
+            # Add session key to state if available
+            session_id = shared_memory.get_current_session()
+            if session_id:
+                session_key = f"remediate_{session_id}"
+                self.agent.state.aws_session_key = session_key
         else:
+            session_id = shared_memory.get_current_session()
+            session_key = f"remediate_{session_id}" if session_id else None
+            
             self.agent.state = AgentState({
-            "shared_memory": shared_memory.data,
-            "agent_type": "remediation",
-            "terraform_dir": self.terraform_dir
-        })
+                "shared_memory": shared_memory.data,
+                "agent_type": "remediation",
+                "terraform_dir": self.terraform_dir,
+                "aws_region": self.region,
+                "aws_session_key": session_key
+            })
         
     def _set_shared_memory_wrapper(self, key: str, value) -> dict:
         """Wrapper for setting values in shared memory"""

@@ -134,6 +134,76 @@ class NotificationConfig(BaseModel):
     setup_aws_config: bool = Field(False, description="Whether to set up AWS Config for drift detection")
     include_global_resources: bool = Field(True, description="Whether to include global resources in monitoring")
 
+def create_and_register_boto3_session(user_id: str, agent_type: str, session_id: str) -> Optional[Boto3Session]:
+    """
+    Create a boto3 session for a user and register it with the AWS wrapper.
+    
+    Args:
+        user_id: The user ID to retrieve credentials for
+        agent_type: The type of agent (orchestration, detect, analyzer, etc.)
+        session_id: The session ID
+        
+    Returns:
+        The boto3 session if created successfully, None otherwise
+    """
+    try:
+        # Create session key
+        session_key = f"{agent_type}_{session_id}"
+        
+        # First check if we already have a session with this key
+        try:
+            from useful_tools.aws_wrapper import _boto3_sessions, get_boto3_session
+            existing_session = get_boto3_session(session_key)
+            if existing_session:
+                logger.info(f"Found existing boto3 session for {session_key}, reusing it")
+                return existing_session
+        except ImportError:
+            logger.warning("Could not import aws_wrapper to check for existing sessions")
+        
+        # Get boto3 session for this user
+        user_session = get_user_boto3_session(user_id)
+        if not user_session:
+            logger.warning(f"No credentials found for user {user_id}")
+            return None
+        
+        # Register the session with our wrapper
+        try:
+            from useful_tools.aws_wrapper import register_boto3_session, _boto3_sessions
+            register_boto3_session(session_key, user_session)
+            logger.info(f"Registered boto3 session with aws_wrapper for {session_key}")
+            logger.info(f"Available boto3 sessions after registration: {list(_boto3_sessions.keys())}")
+            
+            # Also store session information in shared memory
+            credentials = user_session.get_credentials()
+            if credentials:
+                frozen_creds = credentials.get_frozen_credentials()
+                session_info = {
+                    "access_key": frozen_creds.access_key,
+                    "secret_key": frozen_creds.secret_key,
+                    "region": user_session.region_name or "ap-southeast-2",
+                    "timestamp": datetime.now().isoformat()
+                }
+                # Store in shared memory with a special prefix
+                shared_memory.set(f"boto3_session_{session_key}", session_info)
+                logger.info(f"Stored boto3 session info in shared memory for {session_key}")
+            
+            # Update shared memory with session information
+            shared_memory.set(f"{agent_type}_aws_session_available", True, session_id)
+            shared_memory.set(f"{agent_type}_aws_session_key", session_key, session_id)
+            shared_memory.set(f"{agent_type}_aws_region", user_session.region_name or "ap-southeast-2", session_id)
+            
+            # Also store the user_id in session-specific memory
+            shared_memory.set("user_id", user_id, session_id)
+            shared_memory.set("current_user_id", user_id, session_id)
+            
+            return user_session
+        except ImportError:
+            logger.warning("Could not import aws_wrapper, boto3 session will not be used by use_aws tool")
+            return None
+    except Exception as e:
+        logger.error(f"Error creating and registering boto3 session: {e}")
+        return None
+
 # Chat-based Orchestrator Class
 class ChatOrchestrator:
     """Intelligent conversation orchestrator that routes messages to appropriate agents"""
@@ -203,15 +273,16 @@ class ChatOrchestrator:
     
     async def process_chat_message(self, session_id: str, message: str) -> Dict[str, Any]:
         """Process a chat message and route to appropriate agent if needed"""
-        if session_id not in session_states:
-            session_id = await self.initialize_session(session_id)
-        
-        # Set the current session in shared memory
-        shared_memory.set_session(session_id)
-        
-        session_state = session_states[session_id]
-        
         try:
+            if session_id not in session_states:
+                logger.info(f"Initializing new session for {session_id}")
+                session_id = await self.initialize_session(session_id)
+            
+            # Set the current session in shared memory
+            shared_memory.set_session(session_id)
+            
+            session_state = session_states[session_id]
+            
             # Add user message to conversation history
             session_state["conversation_history"].append({
                 "role": "user",
@@ -227,9 +298,36 @@ class ChatOrchestrator:
             shared_memory.set("current_user_message", message, session_id)
             shared_memory.set("context", serializable_context, session_id)
             
+            # Check if there's a user_id associated with the current request
+            user_id = shared_memory.get("current_user_id", session_id=session_id)
+            
+            # If user_id exists, get boto3 session for this orchestration execution
+            if user_id:
+                logger.info(f"Setting up AWS session for orchestration agent using user_id: {user_id}")
+                
+                # Ensure the session ID is properly set in shared memory
+                shared_memory.set_session(session_id)
+                
+                # Store current_user_id in session-specific memory
+                shared_memory.set("current_user_id", user_id, session_id)
+                
+                # Create and register boto3 session
+                user_session = create_and_register_boto3_session(user_id, "orchestration", session_id)
+                
+                if user_session:
+                    # Store boto3 session in orchestrator's _boto3_sessions dictionary
+                    session_key = f"orchestration_{session_id}"
+                    self._boto3_sessions[session_key] = user_session
+                    
+                    # Log the available boto3 sessions
+                    logger.info(f"Available boto3 sessions in orchestrator: {list(self._boto3_sessions.keys())}")
+            
             # Let the orchestration agent decide what to do
+            logger.info("Getting orchestration agent")
             orchestration_agent = self.agents['orchestration'].get_agent()
+            
             # Update shared memory using the proper method
+            logger.info("Updating shared memory")
             self.agents['orchestration'].update_shared_memory()
             
             # Create a context-aware prompt for the orchestrator
@@ -257,7 +355,9 @@ You can also run multiple agents in parallel if needed for better performance.
 """
             
             # Execute orchestration agent
+            logger.info("Executing orchestration agent")
             orchestration_result = orchestration_agent(context_prompt)
+            logger.info(f"Orchestration result type: {type(orchestration_result)}")
             
             # Determine if orchestrator wants to route to a specific agent
             routed_agent = None
@@ -298,25 +398,30 @@ You can also run multiple agents in parallel if needed for better performance.
             # Check if orchestrator indicated it wants to route to a specific agent
             elif "routing to DetectAgent" in orchestration_response.lower() or "invoking detectagent" in orchestration_response.lower():
                 routed_agent = "DetectAgent"
+                logger.info(f"Executing DetectAgent")
                 agent_result = self._execute_agent('detect', message, session_id)
                 session_state["conversation_state"] = "detection_complete"
                 
             elif "routing to driftanalyzeragent" in orchestration_response.lower() or "invoking analyzer" in orchestration_response.lower():
                 routed_agent = "DriftAnalyzerAgent"
+                logger.info(f"Executing DriftAnalyzerAgent")
                 agent_result = self._execute_agent('analyzer', message, session_id)
                 session_state["conversation_state"] = "analysis_complete"
                 
             elif "routing to remediateagent" in orchestration_response.lower() or "invoking remediate" in orchestration_response.lower():
                 routed_agent = "RemediateAgent"
+                logger.info(f"Executing RemediateAgent")
                 agent_result = self._execute_agent('remediate', message, session_id)
                 session_state["conversation_state"] = "remediation_complete"
 
             elif "routing to reportagent" in orchestration_response.lower() or "invoking report" in orchestration_response.lower():
                 routed_agent = "ReportAgent"
+                logger.info(f"Executing ReportAgent")
                 agent_result = self._execute_agent('report', message, session_id)
                 session_state["conversation_state"] = "report_complete"
             
             # Generate suggestions based on current state
+            logger.info(f"Generating suggestions for state: {session_state['conversation_state']}")
             suggestions = self._generate_suggestions(session_state["conversation_state"], routed_agent)
             
             # Add assistant response to conversation history
@@ -334,6 +439,18 @@ You can also run multiple agents in parallel if needed for better performance.
             # Update session state in shared memory
             shared_memory.set("state", session_state["conversation_state"], session_id)
             
+            # Clean up boto3 session if we created one
+            session_key = f"orchestration_{session_id}"
+            if session_key in self._boto3_sessions:
+                try:
+                    from useful_tools.aws_wrapper import clear_boto3_session
+                    clear_boto3_session(session_key)
+                    logger.info(f"Cleared boto3 session from aws_wrapper for {session_key}")
+                except ImportError:
+                    pass
+                del self._boto3_sessions[session_key]
+            
+            logger.info("Returning result from process_chat_message")
             return {
                 "session_id": session_id,
                 "response": orchestration_response,
@@ -346,21 +463,24 @@ You can also run multiple agents in parallel if needed for better performance.
             
         except Exception as e:
             logger.error(f"Error processing chat message: {e}")
+            logger.exception("Full traceback:")
             error_response = f"I encountered an error while processing your message: {str(e)}. Please try again or rephrase your request."
             
-            session_state["conversation_history"].append({
-                "role": "assistant",
-                "message": error_response,
-                "error": True,
-                "timestamp": datetime.now()
-            })
+            if session_id in session_states:
+                session_state = session_states[session_id]
+                session_state["conversation_history"].append({
+                    "role": "assistant",
+                    "message": error_response,
+                    "error": True,
+                    "timestamp": datetime.now()
+                })
             
             return {
                 "session_id": session_id,
                 "response": error_response,
                 "routed_agent": None,
                 "agent_result": None,
-                "conversation_state": session_state["conversation_state"],
+                "conversation_state": "error",
                 "timestamp": datetime.now(),
                 "suggestions": ["Try rephrasing your request", "Ask for help", "Check system status"]
             }
@@ -381,12 +501,15 @@ You can also run multiple agents in parallel if needed for better performance.
             # Check if there's a user_id associated with the current request
             user_id = shared_memory.get("current_user_id", session_id=session_id)
             
+            # Store original environment variables
+            original_env = {}
+            
             # If user_id exists, get boto3 session for this agent execution
             if user_id:
                 logger.info(f"Setting up AWS session for {agent_type} agent using user_id: {user_id}")
                 
-                # Get user-specific boto3 session
-                user_session = get_user_boto3_session(user_id)
+                # Create and register boto3 session
+                user_session = create_and_register_boto3_session(user_id, agent_type, session_id)
                 
                 if user_session:
                     # Store boto3 session in a global dictionary keyed by agent_type and session_id
@@ -394,9 +517,9 @@ You can also run multiple agents in parallel if needed for better performance.
                     session_key = f"{agent_type}_{session_id}"
                     self._boto3_sessions[session_key] = user_session
                     
-                    # Update shared memory with session information
-                    shared_memory.set(f"{agent_type}_aws_session_available", True, session_id)
-                    shared_memory.set(f"{agent_type}_aws_region", user_session.region_name or "ap-southeast-2", session_id)
+                    # Also set AWS environment variables temporarily
+                    # This is for tools that don't use our wrapper
+                    original_env = set_aws_env_for_user(user_id)
             
             # Execute the agent
             result = agent(user_message)
@@ -408,10 +531,26 @@ You can also run multiple agents in parallel if needed for better performance.
             session_key = f"{agent_type}_{session_id}"
             if session_key in self._boto3_sessions:
                 del self._boto3_sessions[session_key]
+                
+                # Also clean up in the wrapper if available
+                try:
+                    from useful_tools.aws_wrapper import clear_boto3_session
+                    clear_boto3_session(session_key)
+                    logger.info(f"Cleared boto3 session from aws_wrapper for {session_key}")
+                except ImportError:
+                    pass
+            
+            # Restore original environment variables
+            if original_env:
+                restore_aws_env(original_env)
             
             return str(result)
             
         except Exception as e:
+            # Ensure we restore environment variables even if there's an error
+            if 'original_env' in locals() and original_env:
+                restore_aws_env(original_env)
+                
             logger.error(f"Error executing {agent_type} agent: {e}")
             return f"Error executing {agent_type}: {str(e)}"
             
@@ -428,24 +567,63 @@ You can also run multiple agents in parallel if needed for better performance.
     async def execute_agents_in_parallel(self, agent_types: List[str], user_message: str, session_id: str = None) -> Dict[str, str]:
         """Execute multiple agents in parallel and return their results"""
         tasks = []
-        for agent_type in agent_types:
-            if agent_type in self.agents:
-                task = self._execute_agent_async(agent_type, user_message, session_id)
-                tasks.append((agent_type, task))
-            else:
-                logger.warning(f"Agent type '{agent_type}' not found in available agents")
+        original_env = {}
         
-        # Execute all tasks in parallel
-        results = {}
-        for agent_type, task in tasks:
-            try:
-                result = await task
-                results[agent_type] = result
-            except Exception as e:
-                logger.error(f"Error executing {agent_type} agent in parallel: {e}")
-                results[agent_type] = f"Error: {str(e)}"
+        # Check if there's a user_id associated with the current request
+        user_id = shared_memory.get("current_user_id", session_id=session_id)
         
-        return results
+        # If user_id exists, set up boto3 sessions for each agent
+        if user_id:
+            logger.info(f"Setting up AWS sessions for parallel execution using user_id: {user_id}")
+            
+            # Create and register boto3 sessions for each agent
+            for agent_type in agent_types:
+                if agent_type in self.agents:
+                    # Create and register boto3 session
+                    user_session = create_and_register_boto3_session(user_id, agent_type, session_id)
+                    if user_session:
+                        # Store boto3 session in orchestrator's _boto3_sessions dictionary
+                        session_key = f"{agent_type}_{session_id}"
+                        self._boto3_sessions[session_key] = user_session
+            
+            # Also set AWS environment variables temporarily
+            # This is for tools that don't use our wrapper
+            original_env = set_aws_env_for_user(user_id)
+        
+        try:
+            for agent_type in agent_types:
+                if agent_type in self.agents:
+                    task = self._execute_agent_async(agent_type, user_message, session_id)
+                    tasks.append((agent_type, task))
+                else:
+                    logger.warning(f"Agent type '{agent_type}' not found in available agents")
+            
+            # Execute all tasks in parallel
+            results = {}
+            for agent_type, task in tasks:
+                try:
+                    result = await task
+                    results[agent_type] = result
+                except Exception as e:
+                    logger.error(f"Error executing {agent_type} agent in parallel: {e}")
+                    results[agent_type] = f"Error: {str(e)}"
+            
+            return results
+        finally:
+            # Restore original environment variables
+            if original_env:
+                restore_aws_env(original_env)
+            
+            # Clean up boto3 sessions
+            if user_id:
+                for agent_type in agent_types:
+                    session_key = f"{agent_type}_{session_id}"
+                    try:
+                        from useful_tools.aws_wrapper import clear_boto3_session
+                        clear_boto3_session(session_key)
+                        logger.info(f"Cleared boto3 session from aws_wrapper for {session_key}")
+                    except ImportError:
+                        pass
     
 
     
@@ -560,15 +738,15 @@ async def chat(
             shared_memory.set("user_id", user_id, session_id)
             shared_memory.set("current_user_id", user_id, session_id)
             
-            # Get boto3 session for this user if credentials exist
-            user_session = get_user_boto3_session(user_id)
+            # Create and register boto3 session for orchestration agent
+            user_session = create_and_register_boto3_session(user_id, "orchestration", session_id)
+            
+            # Store the session in orchestrator's _boto3_sessions dictionary
             if user_session:
-                # Store session information in shared memory
-                # (We don't store actual credentials in shared memory for security)
-                shared_memory.set("aws_session_available", True, session_id)
-                shared_memory.set("aws_region", user_session.region_name or "ap-southeast-2", session_id)
-                
-                logger.info(f"Using AWS credentials for user {user_id} in chat request")
+                session_key = f"orchestration_{session_id}"
+                orchestrator._boto3_sessions[session_key] = user_session
+            
+            logger.info(f"Using AWS credentials for user {user_id} in chat request")
         
         # Process the chat message
         result = await orchestrator.process_chat_message(session_id, request.message)
@@ -2385,6 +2563,358 @@ async def test_aws_multi_user(
             status_code=500,
             detail=f"Failed to test AWS multi-user isolation: {str(e)}"
         )
+
+def set_aws_env_for_user(user_id: str) -> Dict[str, str]:
+    """
+    Set AWS environment variables for a specific user.
+    
+    Args:
+        user_id: The user ID to retrieve credentials for
+        
+    Returns:
+        A dictionary of the original environment variables that were replaced
+    """
+    if not user_id:
+        logger.warning("No user ID provided, not setting AWS environment variables")
+        return {}
+    
+    # Try to get user-specific credentials from shared memory
+    user_credentials_key = f"aws_credentials_{user_id}"
+    user_credentials = shared_memory.get(user_credentials_key)
+    
+    if not user_credentials:
+        logger.warning(f"No credentials found for user {user_id}, not setting AWS environment variables")
+        return {}
+    
+    # Store original environment variables
+    original_env = {
+        "AWS_ACCESS_KEY_ID": os.environ.get("AWS_ACCESS_KEY_ID"),
+        "AWS_SECRET_ACCESS_KEY": os.environ.get("AWS_SECRET_ACCESS_KEY"),
+        "AWS_REGION": os.environ.get("AWS_REGION")
+    }
+    
+    # Set environment variables for this user
+    os.environ["AWS_ACCESS_KEY_ID"] = user_credentials.get("access_key")
+    os.environ["AWS_SECRET_ACCESS_KEY"] = user_credentials.get("secret_key")
+    os.environ["AWS_REGION"] = user_credentials.get("region", "ap-southeast-2")
+    
+    logger.info(f"Set AWS environment variables for user {user_id}")
+    
+    return original_env
+
+def restore_aws_env(original_env: Dict[str, str]) -> None:
+    """
+    Restore AWS environment variables to their original values.
+    
+    Args:
+        original_env: Dictionary of original environment variables
+    """
+    for key, value in original_env.items():
+        if value is None:
+            if key in os.environ:
+                del os.environ[key]
+        else:
+            os.environ[key] = value
+    
+    logger.info("Restored original AWS environment variables")
+
+@app.get("/test-aws-connection", summary="Test AWS Connection")
+async def test_aws_connection(
+    user_id: str,
+    service: str = "sts",
+    operation: str = "get_caller_identity",
+    session_id: Optional[str] = None
+):
+    """
+    Test AWS connection with user-specific credentials.
+    
+    This endpoint:
+    1. Gets the boto3 session for the specified user
+    2. Makes a simple AWS API call
+    3. Returns the result
+    
+    Args:
+        user_id: The user ID to test credentials for
+        service: AWS service to test (default: sts)
+        operation: AWS operation to test (default: get_caller_identity)
+        session_id: Optional session ID to associate with the test
+    """
+    try:
+        # Create a new session ID if not provided
+        if not session_id:
+            session_id = str(uuid.uuid4())
+            
+        # Set the current session in shared memory
+        shared_memory.set_session(session_id)
+        
+        # Store user_id in shared memory
+        shared_memory.set("user_id", user_id, session_id)
+        shared_memory.set("current_user_id", user_id, session_id)
+        
+        # Create and register boto3 session
+        agent_type = "test"
+        user_session = create_and_register_boto3_session(user_id, agent_type, session_id)
+        if not user_session:
+            return {
+                "status": "error",
+                "message": f"No credentials found for user {user_id}",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Make AWS API call directly
+        try:
+            client = user_session.client(service)
+            method = getattr(client, operation)
+            response = method()
+            
+            # Convert datetime objects to strings for JSON serialization
+            def convert_datetime(obj):
+                if hasattr(obj, 'isoformat'):
+                    return obj.isoformat()
+                elif isinstance(obj, dict):
+                    return {k: convert_datetime(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_datetime(i) for i in obj]
+                else:
+                    return obj
+            
+            response = convert_datetime(response)
+            
+            # Clean up the session
+            try:
+                from useful_tools.aws_wrapper import clear_boto3_session
+                clear_boto3_session(f"{agent_type}_{session_id}")
+                logger.info(f"Cleared boto3 session from aws_wrapper for {agent_type}_{session_id}")
+            except ImportError:
+                pass
+            
+            return {
+                "status": "success",
+                "message": f"Successfully connected to AWS using credentials for user {user_id}",
+                "service": service,
+                "operation": operation,
+                "response": response,
+                "session_id": session_id,
+                "user_id": user_id,
+                "timestamp": datetime.now().isoformat()
+            }
+        except Exception as aws_error:
+            logger.error(f"AWS API call error: {aws_error}")
+            return {
+                "status": "error",
+                "message": f"AWS API call failed: {str(aws_error)}",
+                "service": service,
+                "operation": operation,
+                "session_id": session_id,
+                "user_id": user_id,
+                "timestamp": datetime.now().isoformat()
+            }
+    except Exception as e:
+        logger.error(f"Error testing AWS connection: {e}")
+        return {
+            "status": "error",
+            "message": f"Error testing AWS connection: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }
+
+@app.get("/test-use-aws-with-session", summary="Test use_aws_with_session Function")
+async def test_use_aws_with_session(
+    user_id: str,
+    service: str = "sts",
+    operation: str = "get_caller_identity",
+    session_id: Optional[str] = None,
+    agent_type: str = "orchestration"
+):
+    """
+    Test the use_aws_with_session function with user-specific credentials.
+    
+    This endpoint:
+    1. Sets up the boto3 session for the specified user
+    2. Makes an AWS API call using the use_aws_with_session function
+    3. Returns the result
+    
+    Args:
+        user_id: The user ID to test credentials for
+        service: AWS service to test (default: sts)
+        operation: AWS operation to test (default: get_caller_identity)
+        session_id: Optional session ID to associate with the test
+        agent_type: Agent type to use (default: orchestration)
+    """
+    try:
+        # Create a new session ID if not provided
+        if not session_id:
+            session_id = str(uuid.uuid4())
+            
+        # Set the current session in shared memory
+        shared_memory.set_session(session_id)
+        
+        # Store user_id in shared memory
+        shared_memory.set("user_id", user_id, session_id)
+        shared_memory.set("current_user_id", user_id, session_id)
+        
+        # Create and register boto3 session
+        user_session = create_and_register_boto3_session(user_id, agent_type, session_id)
+        if not user_session:
+            return {
+                "status": "error",
+                "message": f"No credentials found for user {user_id}",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Import the appropriate use_aws_with_session function based on agent_type
+        if agent_type == "orchestration":
+            from agents.orchestration_agent import use_aws_with_session
+        elif agent_type == "detect":
+            from agents.detect_agent import use_aws_with_session
+        elif agent_type == "analyzer":
+            from agents.drift_analyzer_agent import use_aws_with_session
+        else:
+            return {
+                "status": "error",
+                "message": f"Invalid agent_type: {agent_type}. Must be one of: orchestration, detect, analyzer",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Make AWS API call using use_aws_with_session
+        try:
+            # Set up parameters based on the operation
+            parameters = {}
+            
+            # Call use_aws_with_session
+            result = use_aws_with_session(
+                service_name=service,
+                operation_name=operation,
+                parameters=parameters
+            )
+            
+            # Clean up the session
+            try:
+                from useful_tools.aws_wrapper import clear_boto3_session
+                clear_boto3_session(f"{agent_type}_{session_id}")
+                logger.info(f"Cleared boto3 session from aws_wrapper for {agent_type}_{session_id}")
+            except ImportError:
+                pass
+            
+            return {
+                "status": "success",
+                "message": f"Successfully tested use_aws_with_session for user {user_id}",
+                "service": service,
+                "operation": operation,
+                "result": result,
+                "session_id": session_id,
+                "user_id": user_id,
+                "agent_type": agent_type,
+                "timestamp": datetime.now().isoformat()
+            }
+        except Exception as aws_error:
+            logger.error(f"use_aws_with_session error: {aws_error}")
+            return {
+                "status": "error",
+                "message": f"use_aws_with_session failed: {str(aws_error)}",
+                "service": service,
+                "operation": operation,
+                "session_id": session_id,
+                "user_id": user_id,
+                "agent_type": agent_type,
+                "timestamp": datetime.now().isoformat()
+            }
+    except Exception as e:
+        logger.error(f"Error testing use_aws_with_session: {e}")
+        return {
+            "status": "error",
+            "message": f"Error testing use_aws_with_session: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }
+
+@app.get("/debug-boto3-sessions", summary="Debug Boto3 Sessions")
+async def debug_boto3_sessions(session_id: Optional[str] = None):
+    """
+    Debug endpoint to view the current boto3 sessions stored in shared memory.
+    
+    Args:
+        session_id: Optional session ID to filter results
+    """
+    try:
+        # Get all keys in shared memory
+        all_keys = shared_memory.keys()
+        
+        # Filter for boto3 session keys
+        boto3_session_keys = [key for key in all_keys if key.startswith("boto3_session_")]
+        
+        # Get session info for each key
+        sessions_info = {}
+        for key in boto3_session_keys:
+            session_info = shared_memory.get(key)
+            if session_info:
+                # Mask sensitive information
+                if "access_key" in session_info:
+                    access_key = session_info["access_key"]
+                    session_info["access_key"] = access_key[:4] + "..." + access_key[-4:] if len(access_key) > 8 else "***"
+                if "secret_key" in session_info:
+                    session_info["secret_key"] = "***"
+                
+                sessions_info[key] = session_info
+        
+        # Also check AWS wrapper module for in-memory sessions
+        in_memory_sessions = []
+        try:
+            from useful_tools.aws_wrapper import _boto3_sessions
+            in_memory_sessions = list(_boto3_sessions.keys())
+        except ImportError:
+            in_memory_sessions = ["Could not import aws_wrapper"]
+        
+        return {
+            "boto3_sessions_in_shared_memory": sessions_info,
+            "boto3_sessions_in_memory": in_memory_sessions,
+            "session_id": session_id,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error debugging boto3 sessions: {e}")
+        return {
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+@app.get("/current-session-info", summary="Get Current Session Information")
+async def get_current_session_info():
+    """Get information about the current session"""
+    try:
+        current_session_id = shared_memory.get_current_session()
+        
+        # Get user ID if available
+        user_id = None
+        if current_session_id:
+            user_id = shared_memory.get("user_id", session_id=current_session_id)
+            current_user_id = shared_memory.get("current_user_id", session_id=current_session_id)
+        
+        # Check for boto3 sessions
+        boto3_session_keys = []
+        try:
+            from useful_tools.aws_wrapper import _boto3_sessions
+            boto3_session_keys = list(_boto3_sessions.keys())
+        except ImportError:
+            boto3_session_keys = ["Could not import aws_wrapper"]
+        
+        # Check for session-specific boto3 session
+        session_specific_key = f"orchestration_{current_session_id}" if current_session_id else None
+        session_key_exists = session_specific_key in boto3_session_keys if session_specific_key else False
+        
+        return {
+            "current_session_id": current_session_id,
+            "user_id": user_id,
+            "current_user_id": current_user_id if 'current_user_id' in locals() else None,
+            "boto3_session_keys": boto3_session_keys,
+            "session_specific_key": session_specific_key,
+            "session_key_exists": session_key_exists,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting current session info: {e}")
+        return {
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
 
 if __name__ == "__main__":
     # Ensure terraform directory exists
