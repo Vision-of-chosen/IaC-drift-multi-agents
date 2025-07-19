@@ -792,6 +792,74 @@ async def get_terraform_status():
         logger.error(f"Error checking Terraform status: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to check Terraform status: {e}")
 
+@app.post("/set-aws-credentials", summary="Set AWS Credentials")
+async def set_aws_credentials(credentials: AWSCredentials):
+    """
+    Set AWS credentials as environment variables for the current session.
+    
+    This endpoint:
+    1. Validates the provided AWS credentials
+    2. Sets them as environment variables
+    3. Stores them in shared memory for reference
+    4. Returns confirmation of the setup
+    """
+    try:
+        # Set environment variables
+        os.environ["AWS_ACCESS_KEY_ID"] = credentials.aws_access_key_id
+        os.environ["AWS_SECRET_ACCESS_KEY"] = credentials.aws_secret_access_key
+        os.environ["AWS_REGION"] = credentials.aws_region
+        
+        # Store in shared memory for reference
+        shared_memory.set("aws_access_key_id", credentials.aws_access_key_id)
+        shared_memory.set("aws_secret_access_key", credentials.aws_secret_access_key)
+        shared_memory.set("aws_region", credentials.aws_region)
+        shared_memory.set("aws_credentials_set", True)
+        shared_memory.set("aws_credentials_set_timestamp", datetime.now().isoformat())
+        
+        logger.info(f"AWS credentials set successfully for region: {credentials.aws_region}")
+        
+        return {
+            "message": "AWS credentials set successfully",
+            "aws_region": credentials.aws_region,
+            "aws_access_key_id": credentials.aws_access_key_id[:10] + "..." if len(credentials.aws_access_key_id) > 10 else credentials.aws_access_key_id,
+            "timestamp": datetime.now().isoformat(),
+            "status": "success"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error setting AWS credentials: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to set AWS credentials: {str(e)}"
+        )
+
+
+@app.get("/aws-credentials-status", summary="Get AWS Credentials Status")
+async def get_aws_credentials_status():
+    """
+    Check if AWS credentials are set and return their status.
+    """
+    try:
+        aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+        aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+        aws_region = os.environ.get("AWS_REGION")
+        
+        credentials_set = all([aws_access_key_id, aws_secret_access_key, aws_region])
+        
+        return {
+            "credentials_set": credentials_set,
+            "aws_region": aws_region,
+            "aws_access_key_id_present": bool(aws_access_key_id),
+            "aws_secret_access_key_present": bool(aws_secret_access_key),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error checking AWS credentials status: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to check AWS credentials status: {str(e)}"
+        )
 
 @app.get("/help", summary="Get Help Information")
 async def get_help():
