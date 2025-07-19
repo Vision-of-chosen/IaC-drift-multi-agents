@@ -113,7 +113,10 @@ class SystemStatus(BaseModel):
     system_health: str
     terraform_dir: str
 
-
+class AWSCredentials(BaseModel):
+    aws_access_key_id: str = Field(..., description="AWS Access Key ID")
+    aws_secret_access_key: str = Field(..., description="AWS Secret Access Key")
+    aws_region: str = Field(..., description="AWS Region")
 # Chat-based Orchestrator Class
 class ChatOrchestrator:
     """Intelligent conversation orchestrator that routes messages to appropriate agents"""
