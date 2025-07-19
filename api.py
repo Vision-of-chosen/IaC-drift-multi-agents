@@ -15,7 +15,7 @@ Architecture:
 import logging
 import os
 import sys
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 import uuid
 os.environ["BYPASS_TOOL_CONSENT"] = "True"
@@ -35,7 +35,7 @@ import shutil
 sys.path.append("tools/src")
 
 from strands.models.bedrock import BedrockModel
-from agents import OrchestrationAgent, DetectAgent, DriftAnalyzerAgent, RemediateAgent, ReportAgent
+from agents import OrchestrationAgent, DetectAgent, DriftAnalyzerAgent, RemediateAgent, ReportAgent, NotificationAgent
 from shared_memory import shared_memory
 from config import BEDROCK_MODEL_ID, BEDROCK_REGION, TERRAFORM_DIR
 from useful_tools.terraform_tools import terraform_plan, terraform_apply
@@ -117,6 +117,13 @@ class AWSCredentials(BaseModel):
     aws_access_key_id: str = Field(..., description="AWS Access Key ID")
     aws_secret_access_key: str = Field(..., description="AWS Secret Access Key")
     aws_region: str = Field(..., description="AWS Region")
+
+class NotificationConfig(BaseModel):
+    recipient_email: str = Field(..., description="Email address to receive notifications")
+    resource_types: Optional[List[str]] = Field(None, description="List of AWS resource types to monitor")
+    setup_aws_config: bool = Field(False, description="Whether to set up AWS Config for drift detection")
+    include_global_resources: bool = Field(True, description="Whether to include global resources in monitoring")
+
 # Chat-based Orchestrator Class
 class ChatOrchestrator:
     """Intelligent conversation orchestrator that routes messages to appropriate agents"""
@@ -150,7 +157,8 @@ class ChatOrchestrator:
             'detect': DetectAgent(self.model),
             'analyzer': DriftAnalyzerAgent(self.model),
             'remediate': RemediateAgent(self.model),
-            'report': ReportAgent(self.model)
+            'report': ReportAgent(self.model),
+            'notification': NotificationAgent(self.model)
         }
     
     async def initialize_session(self, session_id: Optional[str] = None) -> str:
@@ -1149,7 +1157,204 @@ async def get_daily_journal(date: Optional[str] = None):
             status_code=500,
             detail=f"Failed to retrieve journal: {str(e)}"
         )
+@app.post("/setup-notifications", summary="Setup Email Notifications for AWS Changes")
+async def setup_notifications(config: NotificationConfig):
+    """
+    Configure email notifications for AWS infrastructure changes using AWS-native services.
+    
+    This endpoint:
+    1. Sets up an SNS topic and subscribes the specified email
+    2. Creates EventBridge rules to monitor infrastructure changes
+    3. Optionally sets up AWS Config for drift detection
+    4. Returns the monitoring configuration and setup results
+    """
+    try:
+        # Access the notification agent
+        notification_agent = orchestrator.agents.get('notification')
+        if not notification_agent:
+            raise HTTPException(status_code=404, detail="Notification agent not available")
+        
+        # Set recipient email
+        email_result = notification_agent.set_recipient_email(config.recipient_email)
+        if email_result.get("status") != "success":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to set recipient email: {email_result.get('message')}"
+            )
+        
+        # Store configuration in shared memory
+        shared_memory.set("notification_config", {
+            "recipient_email": config.recipient_email,
+            "resource_types": config.resource_types,
+            "setup_aws_config": config.setup_aws_config,
+            "include_global_resources": config.include_global_resources,
+            "setup_time": datetime.now().isoformat()
+        })
+        
+        # Start monitoring with AWS-native services
+        monitoring_result = notification_agent.start_continuous_monitoring()
+        
+        return {
+            "message": f"AWS-native notification monitoring setup successfully for {config.recipient_email}",
+            "resource_types": config.resource_types or "All critical resources",
+            "aws_config_enabled": config.setup_aws_config,
+            "monitoring_status": monitoring_result,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error setting up notifications: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to setup notifications: {str(e)}"
+        )
 
+@app.get("/notification-status", summary="Get Notification Monitoring Status")
+async def get_notification_status():
+    """
+    Get the current status of AWS-native notification monitoring.
+    """
+    try:
+        # Access the notification agent
+        notification_agent = orchestrator.agents.get('notification')
+        if not notification_agent:
+            raise HTTPException(status_code=404, detail="Notification agent not available")
+            
+        # Get notification status
+        status_result = notification_agent._check_notification_status()
+        if status_result.get("status") != "success":
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to check notification status: {status_result.get('message')}"
+            )
+            
+        # Get notification configuration from shared memory
+        notification_config = shared_memory.get("notification_config", {})
+        monitoring_active = shared_memory.get("notification_monitoring_active", False)
+        last_notification = shared_memory.get("last_notification_sent")
+        
+        return {
+            "monitoring_active": monitoring_active,
+            "recipient_email": notification_config.get("recipient_email"),
+            "resource_types": notification_config.get("resource_types"),
+            "setup_time": notification_config.get("setup_time"),
+            "last_notification_sent": last_notification,
+            "system_status": status_result.get("notification_system", {}),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting notification status: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get notification status: {str(e)}"
+        )
+
+@app.post("/run-notification-check", summary="Send Test Notification")
+async def run_notification_check(custom_message: Optional[str] = None):
+    """
+    Send a test notification through the AWS-native notification system.
+    
+    Args:
+        custom_message: Optional custom message for the test notification
+    """
+    try:
+        # Access the notification agent
+        notification_agent = orchestrator.agents.get('notification')
+        if not notification_agent:
+            raise HTTPException(status_code=404, detail="Notification agent not available")
+        
+        # Check if SNS topic ARN is set
+        if not notification_agent.sns_topic_arn:
+            # Try to retrieve from shared memory
+            notification_agent.sns_topic_arn = shared_memory.get("notification_sns_topic_arn")
+            
+            # If still not available, set up the SNS topic
+            if not notification_agent.sns_topic_arn:
+                sns_result = notification_agent._setup_sns_topic()
+                if sns_result.get("status") != "success":
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to set up SNS topic: {sns_result.get('message')}"
+                    )
+        
+        # Send test notification
+        subject = "AWS Drift Monitoring - Test Notification"
+        message = custom_message or "This is a test notification from the AWS Drift Monitoring System."
+        
+        # Call the _send_test_notification method with parameters
+        notification_result = notification_agent._send_test_notification(
+            subject=subject,
+            message=message
+        )
+        
+        if notification_result.get("status") != "success":
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to send test notification: {notification_result.get('message')}"
+            )
+        
+        return {
+            "message": "Test notification sent successfully",
+            "notification_result": notification_result,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error sending test notification: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to send test notification: {str(e)}"
+        )
+
+class AWSCredentials(BaseModel):
+    access_key: str = Field(..., description="AWS Access Key ID")
+    secret_key: str = Field(..., description="AWS Secret Access Key")
+    region: str = Field("ap-southeast-2", description="AWS Region")
+
+@app.post("/aws-credentials", summary="Get AWS Credentials Export Commands")
+async def get_aws_credentials(credentials: AWSCredentials):
+    """
+    Accept AWS credentials and return them in export command format.
+    Also sets the credentials in the server's environment.
+    
+    Args:
+        credentials: AWS credentials (access key, secret key, region)
+        
+    Returns:
+        Dict with AWS credentials export commands
+    """
+    try:
+        # Set credentials in the environment
+        os.environ["AWS_ACCESS_KEY_ID"] = credentials.access_key
+        os.environ["AWS_SECRET_ACCESS_KEY"] = credentials.secret_key
+        os.environ["AWS_REGION"] = credentials.region
+        
+        logger.info("AWS credentials set in environment")
+        
+        # Format credentials as export commands
+        export_commands = {
+            "export_commands": f"export AWS_ACCESS_KEY_ID={credentials.access_key}\nexport AWS_SECRET_ACCESS_KEY={credentials.secret_key}\nexport AWS_REGION={credentials.region}",
+            "access_key": credentials.access_key,
+            "secret_key": credentials.secret_key,
+            "region": credentials.region,
+            "timestamp": datetime.now().isoformat(),
+            "environment_updated": True
+        }
+        
+        # Store in shared memory for other agents to use
+        shared_memory.set("aws_credentials_set", True)
+        shared_memory.set("aws_region", credentials.region)
+        shared_memory.set("aws_credentials_timestamp", datetime.now().isoformat())
+        
+        return export_commands
+        
+    except Exception as e:
+        logger.error(f"Error processing AWS credentials: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to process AWS credentials: {str(e)}"
+        )
 
 if __name__ == "__main__":
     # Ensure terraform directory exists
