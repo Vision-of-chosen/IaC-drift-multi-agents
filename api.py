@@ -140,6 +140,7 @@ class ChatOrchestrator:
     def __init__(self):
         self.model = self._create_model()
         self.agents = self._create_agents()
+        self._boto3_sessions: Dict[str, Boto3Session] = {} # Dictionary to store boto3 sessions
     
     def _make_json_serializable(self, obj):
         """Convert objects to JSON-serializable format"""
@@ -347,33 +348,33 @@ If handling conversationally:
             # Check if there's a user_id associated with the current request
             user_id = shared_memory.get("current_user_id", session_id=session_id)
             
-            # If user_id exists, configure AWS credentials for this agent execution
+            # If user_id exists, get boto3 session for this agent execution
             if user_id:
-                logger.info(f"Setting up AWS credentials for {agent_type} agent using user_id: {user_id}")
+                logger.info(f"Setting up AWS session for {agent_type} agent using user_id: {user_id}")
                 
                 # Get user-specific boto3 session
                 user_session = get_user_boto3_session(user_id)
+                
                 if user_session:
-                    # Get credentials from the session
-                    credentials = user_session.get_credentials()
-                    if credentials:
-                        # Set environment variables for this agent execution
-                        frozen_credentials = credentials.get_frozen_credentials()
-                        os.environ["AWS_ACCESS_KEY_ID"] = frozen_credentials.access_key
-                        os.environ["AWS_SECRET_ACCESS_KEY"] = frozen_credentials.secret_key
-                        os.environ["AWS_REGION"] = user_session.region_name or "ap-southeast-2"
-                        
-                        # Update shared memory with these credentials for the agent
-                        shared_memory.set(f"{agent_type}_aws_credentials", {
-                            "access_key": frozen_credentials.access_key,
-                            "region": user_session.region_name or "ap-southeast-2"
-                        }, session_id)
+                    # Store boto3 session in a global dictionary keyed by agent_type and session_id
+                    # This makes it available for the agent to use
+                    session_key = f"{agent_type}_{session_id}"
+                    self._boto3_sessions[session_key] = user_session
+                    
+                    # Update shared memory with session information
+                    shared_memory.set(f"{agent_type}_aws_session_available", True, session_id)
+                    shared_memory.set(f"{agent_type}_aws_region", user_session.region_name or "ap-southeast-2", session_id)
             
             # Execute the agent
             result = agent(user_message)
             
             # Store result in shared memory
             shared_memory.set(f"{agent_type}_last_result", str(result), session_id)
+            
+            # Clean up the boto3 session reference after execution
+            session_key = f"{agent_type}_{session_id}"
+            if session_key in self._boto3_sessions:
+                del self._boto3_sessions[session_key]
             
             return str(result)
             
@@ -440,12 +441,22 @@ async def root():
 
 
 
+async def get_session_id_from_header(x_session_id: Optional[str] = Header(None, alias="X-Session-ID")) -> Optional[str]:
+    """Extract session ID from header."""
+    return x_session_id
+
 @app.post("/chat", response_model=ChatResponse, summary="Chat with Terraform Drift Assistant")
-async def chat(request: ChatMessage, x_user_id: Optional[str] = Header(None)):
+async def chat(
+    request: ChatMessage, 
+    x_user_id: Optional[str] = Header(None),
+    session_id_header: Optional[str] = Depends(get_session_id_from_header)
+):
     """Send a message to the intelligent Terraform drift assistant"""
     try:
         # Initialize session if needed
-        session_id = request.session_id
+        # Use session_id from header if available, otherwise from request
+        session_id = session_id_header or request.session_id
+        
         if not session_id:
             session_id = await orchestrator.initialize_session()
         else:
@@ -455,7 +466,7 @@ async def chat(request: ChatMessage, x_user_id: Optional[str] = Header(None)):
         # Get user ID from request or header
         user_id = request.user_id or x_user_id
         
-        # If user_id is provided, configure AWS credentials for this request
+        # If user_id is provided, store it in session and shared memory
         if user_id:
             # Store user_id in session state for future reference
             if session_id in session_states:
@@ -465,27 +476,15 @@ async def chat(request: ChatMessage, x_user_id: Optional[str] = Header(None)):
             shared_memory.set("user_id", user_id, session_id)
             shared_memory.set("current_user_id", user_id, session_id)
             
-            # Configure boto3 session for this user if credentials exist
+            # Get boto3 session for this user if credentials exist
             user_session = get_user_boto3_session(user_id)
             if user_session:
-                # Get credentials from the session
-                credentials = user_session.get_credentials()
-                if credentials:
-                    # Set environment variables for this request
-                    frozen_credentials = credentials.get_frozen_credentials()
-                    os.environ["AWS_ACCESS_KEY_ID"] = frozen_credentials.access_key
-                    os.environ["AWS_SECRET_ACCESS_KEY"] = frozen_credentials.secret_key
-                    os.environ["AWS_REGION"] = user_session.region_name or "ap-southeast-2"
-                    
-                    # Store AWS credentials in session-specific shared memory
-                    shared_memory.set("aws_credentials", {
-                        "access_key": frozen_credentials.access_key,
-                        "secret_key": frozen_credentials.secret_key,
-                        "region": user_session.region_name or "ap-southeast-2",
-                        "timestamp": datetime.now().isoformat()
-                    }, session_id)
-                    
-                    logger.info(f"Using AWS credentials for user {user_id} in chat request")
+                # Store session information in shared memory
+                # (We don't store actual credentials in shared memory for security)
+                shared_memory.set("aws_session_available", True, session_id)
+                shared_memory.set("aws_region", user_session.region_name or "ap-southeast-2", session_id)
+                
+                logger.info(f"Using AWS credentials for user {user_id} in chat request")
         
         # Process the chat message
         result = await orchestrator.process_chat_message(session_id, request.message)
@@ -525,9 +524,24 @@ async def start_session():
         raise HTTPException(status_code=500, detail=f"Failed to start session: {e}")
 
 
-@app.get("/status/{session_id}", response_model=WorkflowStatus, summary="Get Session Status")
-async def get_session_status(session_id: str):
-    """Get current status of a conversation session"""
+@app.get("/status", response_model=WorkflowStatus, summary="Get Session Status")
+async def get_session_status(
+    session_id: Optional[str] = None,
+    session_id_header: Optional[str] = Depends(get_session_id_from_header)
+):
+    """
+    Get current status of a conversation session.
+    
+    Args:
+        session_id: Optional session ID as query parameter
+        session_id_header: Optional session ID from X-Session-ID header
+    """
+    # Use session_id from header if available, otherwise from parameter
+    session_id = session_id_header or session_id
+    
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Session ID is required")
+        
     if session_id not in session_states:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -551,9 +565,24 @@ async def get_session_status(session_id: str):
     )
 
 
-@app.get("/conversation/{session_id}", summary="Get Conversation History")
-async def get_conversation_history(session_id: str):
-    """Get the conversation history for a session"""
+@app.get("/conversation", summary="Get Conversation History")
+async def get_conversation_history(
+    session_id: Optional[str] = None,
+    session_id_header: Optional[str] = Depends(get_session_id_from_header)
+):
+    """
+    Get the conversation history for a session.
+    
+    Args:
+        session_id: Optional session ID as query parameter
+        session_id_header: Optional session ID from X-Session-ID header
+    """
+    # Use session_id from header if available, otherwise from parameter
+    session_id = session_id_header or session_id
+    
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Session ID is required")
+        
     if session_id not in session_states:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -569,14 +598,22 @@ async def get_conversation_history(session_id: str):
 
 
 @app.get("/shared-memory", summary="View Shared Memory")
-async def get_shared_memory(session_id: Optional[str] = None, include_global: bool = True):
+async def get_shared_memory(
+    session_id: Optional[str] = None, 
+    include_global: bool = True,
+    session_id_header: Optional[str] = Depends(get_session_id_from_header)
+):
     """
     Get current shared memory contents.
     
     Args:
-        session_id: Optional session ID to get memory for
+        session_id: Optional session ID as query parameter
         include_global: Whether to include global (non-session) memory
+        session_id_header: Optional session ID from X-Session-ID header
     """
+    # Use session_id from header if available, otherwise from parameter
+    session_id = session_id_header or session_id
+    
     if session_id:
         # Set the current session in shared memory
         shared_memory.set_session(session_id)
@@ -622,9 +659,24 @@ async def get_system_status():
         terraform_dir=TERRAFORM_DIR
     )
 
-@app.delete("/session/{session_id}", summary="Clear Session")
-async def clear_session(session_id: str):
-    """Clear a specific session"""
+@app.delete("/session", summary="Clear Session")
+async def clear_session(
+    session_id: Optional[str] = None,
+    session_id_header: Optional[str] = Depends(get_session_id_from_header)
+):
+    """
+    Clear a specific session.
+    
+    Args:
+        session_id: Optional session ID as query parameter
+        session_id_header: Optional session ID from X-Session-ID header
+    """
+    # Use session_id from header if available, otherwise from parameter
+    session_id = session_id_header or session_id
+    
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Session ID is required")
+        
     if session_id not in session_states:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -951,7 +1003,7 @@ async def get_terraform_status():
         logger.error(f"Error checking Terraform status: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to check Terraform status: {e}")
 
-def get_user_boto3_session(user_id: str = None) -> Boto3Session:
+def get_user_boto3_session(user_id: str = None) -> Optional[Boto3Session]:
     """
     Get a boto3 session configured with user-specific AWS credentials.
     
@@ -962,7 +1014,7 @@ def get_user_boto3_session(user_id: str = None) -> Boto3Session:
         A configured boto3 Session object
     """
     if not user_id:
-        # Use default environment credentials if no user_id provided
+        # Use default credentials from environment if no user_id provided
         return boto3.session.Session()
     
     # Try to get user-specific credentials from shared memory
@@ -984,18 +1036,21 @@ def get_user_boto3_session(user_id: str = None) -> Boto3Session:
 @app.post("/set-aws-credentials", summary="Set AWS Credentials")
 async def set_aws_credentials(
     credentials: AWSCredentials,
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    session_id_header: Optional[str] = Depends(get_session_id_from_header)
 ):
     """
-    Set AWS credentials as environment variables for the current session.
+    Set AWS credentials for the user and session.
     
     This endpoint:
     1. Validates the provided AWS credentials
-    2. Sets them as environment variables
-    3. Stores them in shared memory for reference
-    4. Returns confirmation of the setup
+    2. Stores them in shared memory for reference
+    3. Returns confirmation of the setup
     """
     try:
+        # Use session_id from header if available, otherwise from parameter
+        session_id = session_id_header or session_id
+        
         # Generate a user ID if not provided
         user_id = credentials.user_id or str(uuid.uuid4())
         
@@ -1015,15 +1070,11 @@ async def set_aws_credentials(
         user_credentials_key = f"aws_credentials_{user_id}"
         shared_memory.set(user_credentials_key, aws_credentials)
         
-        # If session provided, also store in session-specific memory
+        # If session provided, also store user_id in session-specific memory
         if session_id:
-            shared_memory.set("aws_credentials", aws_credentials, session_id)
             shared_memory.set("user_id", user_id, session_id)
-        
-        # For backward compatibility, also set in environment
-        os.environ["AWS_ACCESS_KEY_ID"] = credentials.access_key
-        os.environ["AWS_SECRET_ACCESS_KEY"] = credentials.secret_key
-        os.environ["AWS_REGION"] = credentials.region
+            shared_memory.set("aws_region", credentials.region, session_id)
+            shared_memory.set("aws_session_available", True, session_id)
         
         logger.info(f"AWS credentials set for user: {user_id}")
         
@@ -1516,20 +1567,25 @@ class AWSCredentials(BaseModel):
 @app.post("/aws-credentials", summary="Get AWS Credentials Export Commands")
 async def get_aws_credentials(
     credentials: AWSCredentials,
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    session_id_header: Optional[str] = Depends(get_session_id_from_header)
 ):
     """
     Accept AWS credentials and return them in export command format.
-    Also sets the credentials in the server's environment.
+    Also stores them for the user and session.
     
     Args:
         credentials: AWS credentials (access key, secret key, region)
         session_id: Optional session ID to associate credentials with
+        session_id_header: Optional session ID from X-Session-ID header
         
     Returns:
         Dict with AWS credentials export commands
     """
     try:
+        # Use session_id from header if available, otherwise from parameter
+        session_id = session_id_header or session_id
+        
         # Generate a user ID if not provided
         user_id = credentials.user_id or str(uuid.uuid4())
         
@@ -1549,15 +1605,11 @@ async def get_aws_credentials(
         # Store globally for user-specific access
         shared_memory.set(user_credentials_key, aws_credentials)
         
-        # If session provided, also store in session-specific memory
+        # If session provided, also store user_id in session-specific memory
         if session_id:
-            shared_memory.set("aws_credentials", aws_credentials, session_id)
             shared_memory.set("user_id", user_id, session_id)
-        
-        # For backward compatibility, also set in environment
-        os.environ["AWS_ACCESS_KEY_ID"] = credentials.access_key
-        os.environ["AWS_SECRET_ACCESS_KEY"] = credentials.secret_key
-        os.environ["AWS_REGION"] = credentials.region
+            shared_memory.set("aws_region", credentials.region, session_id)
+            shared_memory.set("aws_session_available", True, session_id)
         
         logger.info(f"AWS credentials set for user: {user_id}")
         
@@ -1570,7 +1622,7 @@ async def get_aws_credentials(
             "secret_key": credentials.secret_key,
             "region": credentials.region,
             "timestamp": datetime.now().isoformat(),
-            "environment_updated": True
+            "environment_updated": False
         }
         
         return export_commands
@@ -1598,51 +1650,69 @@ async def list_aws_resources(user_id: str, resource_type: str = "s3"):
         # Get boto3 session for the user
         session = get_user_boto3_session(user_id)
         
+        if not session:
+            return {
+                "user_id": user_id,
+                "error": "No credentials found for this user",
+                "timestamp": datetime.now().isoformat()
+            }
+        
         resources = []
         
         # List resources based on type
-        if resource_type.lower() == "s3":
-            # List S3 buckets
-            s3_client = session.client('s3')
-            response = s3_client.list_buckets()
-            resources = [{"name": bucket['Name'], "creation_date": bucket['CreationDate'].isoformat()} 
-                        for bucket in response.get('Buckets', [])]
-            
-        elif resource_type.lower() == "ec2":
-            # List EC2 instances
-            ec2_client = session.client('ec2')
-            response = ec2_client.describe_instances()
-            
-            for reservation in response.get('Reservations', []):
-                for instance in reservation.get('Instances', []):
-                    resources.append({
-                        "id": instance.get('InstanceId'),
-                        "type": instance.get('InstanceType'),
-                        "state": instance.get('State', {}).get('Name'),
-                        "launch_time": instance.get('LaunchTime').isoformat() if 'LaunchTime' in instance else None
-                    })
-                    
-        elif resource_type.lower() == "lambda":
-            # List Lambda functions
-            lambda_client = session.client('lambda')
-            response = lambda_client.list_functions()
-            resources = [{"name": function['FunctionName'], "runtime": function['Runtime']} 
-                        for function in response.get('Functions', [])]
+        try:
+            if resource_type.lower() == "s3":
+                # List S3 buckets
+                s3_client = session.client('s3')
+                response = s3_client.list_buckets()
+                resources = [{"name": bucket['Name'], "creation_date": bucket['CreationDate'].isoformat()} 
+                            for bucket in response.get('Buckets', [])]
+                
+            elif resource_type.lower() == "ec2":
+                # List EC2 instances
+                ec2_client = session.client('ec2')
+                response = ec2_client.describe_instances()
+                
+                for reservation in response.get('Reservations', []):
+                    for instance in reservation.get('Instances', []):
+                        resources.append({
+                            "id": instance.get('InstanceId'),
+                            "type": instance.get('InstanceType'),
+                            "state": instance.get('State', {}).get('Name'),
+                            "launch_time": instance.get('LaunchTime').isoformat() if 'LaunchTime' in instance else None
+                        })
                         
-        else:
+            elif resource_type.lower() == "lambda":
+                # List Lambda functions
+                lambda_client = session.client('lambda')
+                response = lambda_client.list_functions()
+                resources = [{"name": function['FunctionName'], "runtime": function['Runtime']} 
+                            for function in response.get('Functions', [])]
+                            
+            else:
+                return {
+                    "error": f"Unsupported resource type: {resource_type}",
+                    "supported_types": ["s3", "ec2", "lambda"],
+                    "user_id": user_id
+                }
+            
             return {
-                "error": f"Unsupported resource type: {resource_type}",
-                "supported_types": ["s3", "ec2", "lambda"]
+                "user_id": user_id,
+                "resource_type": resource_type,
+                "count": len(resources),
+                "resources": resources,
+                "aws_region": session.region_name,
+                "timestamp": datetime.now().isoformat()
+            }
+        except Exception as aws_error:
+            return {
+                "user_id": user_id,
+                "resource_type": resource_type,
+                "error": str(aws_error),
+                "aws_region": session.region_name,
+                "timestamp": datetime.now().isoformat()
             }
             
-        return {
-            "user_id": user_id,
-            "resource_type": resource_type,
-            "count": len(resources),
-            "resources": resources,
-            "timestamp": datetime.now().isoformat()
-        }
-        
     except Exception as e:
         logger.error(f"Error listing AWS resources for user {user_id}: {e}")
         raise HTTPException(
@@ -1671,7 +1741,7 @@ async def list_aws_resources_from_header(
     List AWS resources for a user identified by the X-User-ID header.
     
     Args:
-        resource_type: Type of AWS resource to list (s3, ec2, etc.)
+        resource_type: Type of resources to list (s3, ec2, lambda)
         user_id: User ID extracted from X-User-ID header
         
     Returns:
@@ -1701,18 +1771,35 @@ async def test_aws_credentials(user_id: str):
         # Get boto3 session for the user
         session = get_user_boto3_session(user_id)
         
-        # Test if credentials are valid
-        sts_client = session.client('sts')
-        identity = sts_client.get_caller_identity()
+        if not session:
+            return {
+                "user_id": user_id,
+                "credentials_valid": False,
+                "error": "No credentials found for this user",
+                "timestamp": datetime.now().isoformat()
+            }
         
-        return {
-            "user_id": user_id,
-            "credentials_valid": True,
-            "aws_account_id": identity.get("Account"),
-            "aws_user_arn": identity.get("Arn"),
-            "aws_user_id": identity.get("UserId"),
-            "timestamp": datetime.now().isoformat()
-        }
+        # Test if credentials are valid
+        try:
+            sts_client = session.client('sts')
+            identity = sts_client.get_caller_identity()
+            
+            return {
+                "user_id": user_id,
+                "credentials_valid": True,
+                "aws_account_id": identity.get("Account"),
+                "aws_user_arn": identity.get("Arn"),
+                "aws_user_id": identity.get("UserId"),
+                "aws_region": session.region_name,
+                "timestamp": datetime.now().isoformat()
+            }
+        except Exception as aws_error:
+            return {
+                "user_id": user_id,
+                "credentials_valid": False,
+                "error": str(aws_error),
+                "timestamp": datetime.now().isoformat()
+            }
         
     except Exception as e:
         logger.error(f"Error testing AWS credentials for user {user_id}: {e}")
