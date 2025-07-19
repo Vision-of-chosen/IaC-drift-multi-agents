@@ -122,7 +122,10 @@ class NotificationConfig(BaseModel):
     resource_types: Optional[List[str]] = Field(None, description="List of AWS resource types to monitor")
     setup_aws_config: bool = Field(True, description="Whether to set up AWS Config for drift detection")
     include_global_resources: bool = Field(True, description="Whether to include global resources like IAM in AWS Config")
-
+class AWSCredentials(BaseModel):
+    access_key: str = Field(..., description="AWS Access Key ID")
+    secret_key: str = Field(..., description="AWS Secret Access Key")
+    region: str = Field("ap-southeast-2", description="AWS Region")
 # Chat-based Orchestrator Class
 class ChatOrchestrator:
     """Intelligent conversation orchestrator that routes messages to appropriate agents"""
@@ -628,15 +631,11 @@ async def generate_report():
         logger.error(f"Error generating report: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate report: {e}")
 
-class AWSCredentials(BaseModel):
-    access_key: str = Field(..., description="AWS Access Key ID")
-    secret_key: str = Field(..., description="AWS Secret Access Key")
-    region: str = Field("ap-southeast-2", description="AWS Region")
-
 @app.post("/aws-credentials", summary="Get AWS Credentials Export Commands")
 async def get_aws_credentials(credentials: AWSCredentials):
     """
     Accept AWS credentials and return them in export command format.
+    Also sets the credentials in the server's environment.
     
     Args:
         credentials: AWS credentials (access key, secret key, region)
@@ -645,14 +644,27 @@ async def get_aws_credentials(credentials: AWSCredentials):
         Dict with AWS credentials export commands
     """
     try:
+        # Set credentials in the environment
+        os.environ["AWS_ACCESS_KEY_ID"] = credentials.access_key
+        os.environ["AWS_SECRET_ACCESS_KEY"] = credentials.secret_key
+        os.environ["AWS_REGION"] = credentials.region
+        
+        logger.info("AWS credentials set in environment")
+        
         # Format credentials as export commands
         export_commands = {
             "export_commands": f"export AWS_ACCESS_KEY_ID={credentials.access_key}\nexport AWS_SECRET_ACCESS_KEY={credentials.secret_key}\nexport AWS_REGION={credentials.region}",
             "access_key": credentials.access_key,
             "secret_key": credentials.secret_key,
             "region": credentials.region,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "environment_updated": True
         }
+        
+        # Store in shared memory for other agents to use
+        shared_memory.set("aws_credentials_set", True)
+        shared_memory.set("aws_region", credentials.region)
+        shared_memory.set("aws_credentials_timestamp", datetime.now().isoformat())
         
         return export_commands
         
@@ -662,7 +674,6 @@ async def get_aws_credentials(credentials: AWSCredentials):
             status_code=500,
             detail=f"Failed to process AWS credentials: {str(e)}"
         )
-        
 @app.get("/terraform-status", summary="Get Terraform Files Status")
 async def get_terraform_status():
     """Get information about Terraform files in the working directory"""
