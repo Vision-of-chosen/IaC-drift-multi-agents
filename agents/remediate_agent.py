@@ -81,7 +81,7 @@ class RemediateAgent:
             system_prompt=AgentPrompts.get_prompt("remediate"),
             name="RemediateAgent",
             description="Specialist in automated Terraform infrastructure remediation using AWS best practices",
-            callback_handler=create_agent_callback_handler("RemediateAgent"),
+            # callback_handler=create_agent_callback_handler("RemediateAgent"),
             tools=tools,
         )
         agent.state = AgentState()

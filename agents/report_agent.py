@@ -42,7 +42,7 @@ class ReportAgent:
             system_prompt=AgentPrompts.get_prompt("report"),
             name="ReportAgent",
             description="Specialist in generating structured reports from drift analysis",
-            callback_handler=create_agent_callback_handler("ReportAgent"),
+            # callback_handler=create_agent_callback_handler("ReportAgent"),
             tools=[
                 file_read,      # Read configuration and previous reports
                 file_write,     # Write JSON report to file

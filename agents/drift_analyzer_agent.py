@@ -41,7 +41,7 @@ class DriftAnalyzerAgent:
             system_prompt=AgentPrompts.get_prompt("analyzer"),
             name="DriftAnalyzerAgent",
             description="Specialist in analyzing drift severity and business impact",
-            callback_handler=create_agent_callback_handler("DriftAnalyzerAgent"),
+            # callback_handler=create_agent_callback_handler("DriftAnalyzerAgent"),
             tools=[
                 use_aws,
                 retrieve,

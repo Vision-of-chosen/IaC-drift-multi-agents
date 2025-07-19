@@ -45,7 +45,7 @@ class OrchestrationAgent:
             system_prompt=AgentPrompts.get_prompt("orchestration"),
             name="OrchestrationAgent",
             description="Central coordinator for the Terraform Drift Detection & Remediation System",
-            callback_handler=create_agent_callback_handler("OrchestrationAgent"),
+            # callback_handler=create_agent_callback_handler("OrchestrationAgent"),
             tools = [
                 file_read,
                 file_write,

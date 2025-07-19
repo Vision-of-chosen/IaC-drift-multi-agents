@@ -93,7 +93,7 @@ class DetectAgent:
             name="DetectAgent",
             description="Specialist in detecting Terraform infrastructure drift by comparing state files with actual AWS resources",
             tools=tools,
-            callback_handler=create_agent_callback_handler("DetectAgent")
+            # callback_handler=create_agent_callback_handler("DetectAgent")
         )
         agent.state = AgentState()
         agent.state.shared_memory = shared_memory.data

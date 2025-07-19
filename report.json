@@ -1,54 +1,87 @@
 {
   "scanDetails": {
-    "id": "scan-sg-usw2-002",
-    "fileName": "N/A",
-    "scanDate": "2023-05-30T17:00:00Z",
+    "id": "scan-001",
+    "fileName": "security_groups.tf",
+    "scanDate": "2023-05-15T10:30:00Z",
     "status": "completed",
-    "totalResources": 1,
-    "driftCount": 0,
-    "riskLevel": "none"
+    "totalResources": 5,
+    "driftCount": 2,
+    "riskLevel": "high"
   },
-  "remediationActions": [
+  "drifts": [
     {
-      "id": "action-001",
+      "id": "drift-001",
       "resourceType": "aws_security_group",
-      "resourceName": "minh-test-sg",
-      "region": "us-west-2",
-      "action": "delete",
-      "status": "completed",
-      "description": "Deleted the 'minh-test-sg' security group in us-west-2 region to address critical security vulnerability.",
-      "impact": "Removed potential unauthorized access risk. Resources previously associated with this group may need review."
+      "resourceName": "web_server_sg",
+      "riskLevel": "high",
+      "beforeState": {
+        "ingress": [
+          {
+            "from_port": 80,
+            "to_port": 80,
+            "protocol": "tcp",
+            "cidr_blocks": ["10.0.0.0/8"]
+          },
+          {
+            "from_port": 443,
+            "to_port": 443,
+            "protocol": "tcp",
+            "cidr_blocks": ["10.0.0.0/8"]
+          }
+        ]
+      },
+      "afterState": {
+        "ingress": [
+          {
+            "from_port": 80,
+            "to_port": 80,
+            "protocol": "tcp",
+            "cidr_blocks": ["0.0.0.0/0"]
+          },
+          {
+            "from_port": 443,
+            "to_port": 443,
+            "protocol": "tcp",
+            "cidr_blocks": ["0.0.0.0/0"]
+          },
+          {
+            "from_port": 22,
+            "to_port": 22,
+            "protocol": "tcp",
+            "cidr_blocks": ["0.0.0.0/0"]
+          }
+        ]
+      },
+      "aiExplanation": "The security group 'web_server_sg' has been modified to allow unrestricted access (0.0.0.0/0) to ports 80 (HTTP) and 443 (HTTPS), which were previously limited to the 10.0.0.0/8 private IP range. Additionally, SSH access (port 22) has been opened to the public internet. These changes significantly increase the attack surface and potential for unauthorized access.",
+      "aiRemediate": "1. Revert the CIDR blocks for ports 80 and 443 to the original '10.0.0.0/8' to limit access to the private network.\n2. Remove the public SSH access rule (port 22) from the security group.\n3. If SSH access is required, create a separate security group with restricted access from specific IP addresses.\n4. Implement a bastion host or VPN for secure remote access if necessary.\n5. Review and update the Terraform configuration to reflect these changes and prevent future drift."
+    },
+    {
+      "id": "drift-002",
+      "resourceType": "aws_security_group",
+      "resourceName": "database_sg",
+      "riskLevel": "medium",
+      "beforeState": {
+        "ingress": [
+          {
+            "from_port": 3306,
+            "to_port": 3306,
+            "protocol": "tcp",
+            "security_groups": ["sg-12345678"]
+          }
+        ]
+      },
+      "afterState": {
+        "ingress": [
+          {
+            "from_port": 3306,
+            "to_port": 3306,
+            "protocol": "tcp",
+            "cidr_blocks": ["10.0.0.0/16"]
+          }
+        ]
+      },
+      "aiExplanation": "The security group 'database_sg' has been modified to allow MySQL access (port 3306) from the entire 10.0.0.0/16 CIDR block, instead of the previously configured specific security group (sg-12345678). This change broadens the range of potential sources that can access the database, which may violate the principle of least privilege.",
+      "aiRemediate": "1. Revert the ingress rule to use the original security group (sg-12345678) instead of the CIDR block.\n2. If broader access is required, consider using a more restrictive CIDR block or multiple security group references to limit access.\n3. Review the applications or services that require database access and ensure they are correctly associated with the appropriate security groups.\n4. Update the Terraform configuration to reflect the correct security group references and prevent future drift.\n5. Implement additional network segmentation or VPC peering if access is required from multiple VPCs or subnets."
     }
-  ],
-  "recommendations": [
-    {
-      "id": "rec-001",
-      "priority": "high",
-      "description": "Review and secure any resources that were using the deleted 'minh-test-sg' security group.",
-      "rationale": "Ensure that the removal of the security group hasn't left any resources exposed or inaccessible."
-    },
-    {
-      "id": "rec-002",
-      "priority": "medium",
-      "description": "Investigate the creation process of the overly permissive 'minh-test-sg' security group.",
-      "rationale": "Understanding how this security group was created can help prevent similar issues in the future."
-    },
-    {
-      "id": "rec-003",
-      "priority": "high",
-      "description": "Implement robust security group management practices, preferably using Infrastructure as Code (IaC) tools.",
-      "rationale": "IaC can help maintain consistent and secure configurations across your infrastructure."
-    },
-    {
-      "id": "rec-004",
-      "priority": "medium",
-      "description": "Conduct a comprehensive review of security groups across all AWS regions.",
-      "rationale": "Ensure no similar misconfigurations exist in other regions or accounts."
-    }
-  ],
-  "systemInfo": {
-    "lastRequest": "can you delete the security group minh-test-sg in us-west-2",
-    "reportGeneratedAt": "2023-05-30T17:05:00Z",
-    "message": "Security group 'minh-test-sg' successfully deleted from us-west-2 region. Follow-up actions recommended."
-  }
+  ]
 }

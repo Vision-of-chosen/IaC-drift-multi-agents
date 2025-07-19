@@ -6,6 +6,7 @@ This module provides a web-based API interface that coordinates the multi-agent
 system with step-by-step user interaction between each agent execution.
 
 Architecture:
+- Step-by-step agent coordination with user approval
 - RESTful API endpoints for each workflow step
 - Session management for workflow state
 - Real-time progress updates
@@ -17,7 +18,7 @@ import sys
 from typing import Dict, Any, Optional
 from datetime import datetime
 import uuid
-import glob
+os.environ["BYPASS_TOOL_CONSENT"] = "True"
 from fastapi import FastAPI, HTTPException, BackgroundTasks, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -25,6 +26,7 @@ from pydantic import BaseModel, Field
 import uvicorn
 import asyncio
 import json
+import glob
 import zipfile
 import tempfile
 import shutil
@@ -33,15 +35,10 @@ import shutil
 sys.path.append("tools/src")
 
 from strands.models.bedrock import BedrockModel
-from strands.multiagent.graph import GraphBuilder
 from agents import OrchestrationAgent, DetectAgent, DriftAnalyzerAgent, RemediateAgent, ReportAgent
 from shared_memory import shared_memory
 from config import BEDROCK_MODEL_ID, BEDROCK_REGION, TERRAFORM_DIR
-from permission_handlers import permission_manager
-
-from useful_tools.terraform_mcp_tool import terraform_run_command
 from useful_tools.terraform_tools import terraform_plan, terraform_apply
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -57,7 +54,6 @@ app = FastAPI(
     
     Features:
     - Traditional REST API endpoints for one-time requests
-
     - Multi-agent orchestration with intelligent routing
     - Session-based conversation management
     """,
@@ -73,9 +69,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global state management
-session_states: Dict[str, Dict[str, Any]] = {}
-
 class TerraformUploadResponse(BaseModel):
     message: str
     filename: str
@@ -84,6 +77,11 @@ class TerraformUploadResponse(BaseModel):
     terraform_apply_result: Dict[str, Any]
     success: bool
     timestamp: datetime
+
+# Global state management
+session_states: Dict[str, Dict[str, Any]] = {}
+
+
 
 # Pydantic Models
 class ChatMessage(BaseModel):
@@ -122,7 +120,7 @@ class ChatOrchestrator:
     
     def __init__(self):
         self.model = self._create_model()
-        self.graph, self.agents = self._create_agents_and_graph()
+        self.agents = self._create_agents()
     
     def _make_json_serializable(self, obj):
         """Convert objects to JSON-serializable format"""
@@ -142,50 +140,15 @@ class ChatOrchestrator:
             region_name=BEDROCK_REGION,
         )
     
-    def _create_agents_and_graph(self):
-        """Create all agent instances and build the graph"""
-        # Create individual agents
-        orchestration_agent = OrchestrationAgent(self.model)
-        detect_agent = DetectAgent(self.model)
-        drift_analyzer_agent = DriftAnalyzerAgent(self.model)
-        remediate_agent = RemediateAgent(self.model)
-        report_agent = ReportAgent(self.model)
-
-        # Build the agent graph using GraphBuilder
-        builder = GraphBuilder()
-        
-        # Add agents as nodes
-        orchestration_node = builder.add_node(orchestration_agent.get_agent(), "orchestration")
-        detect_node = builder.add_node(detect_agent.get_agent(), "detect")
-        analyzer_node = builder.add_node(drift_analyzer_agent.get_agent(), "analyzer")
-        remediate_node = builder.add_node(remediate_agent.get_agent(), "remediate")
-        report_node = builder.add_node(report_agent.get_agent(), "report")
-
-        # Define the workflow edges - all agents connect directly to Orchestration Agent
-        # Orchestration → DetectAgent
-        builder.add_edge(orchestration_node, detect_node)
-        
-        # Orchestration → DriftAnalyzerAgent
-        builder.add_edge(orchestration_node, analyzer_node)
-        
-        # Orchestration → RemediateAgent
-        builder.add_edge(orchestration_node, remediate_node)
-        
-        # Orchestration → ReportAgent
-        builder.add_edge(orchestration_node, report_node)
-        
-        # Build the graph
-        graph = builder.build()
-        
-        agents = {
-            'orchestration': orchestration_agent,
-            'detect': detect_agent, 
-            'analyzer': drift_analyzer_agent,
-            'remediate': remediate_agent,
-            'report': report_agent
+    def _create_agents(self) -> Dict[str, Any]:
+        """Create all agent instances"""
+        return {
+            'orchestration': OrchestrationAgent(self.model),
+            'detect': DetectAgent(self.model),
+            'analyzer': DriftAnalyzerAgent(self.model),
+            'remediate': RemediateAgent(self.model),
+            'report': ReportAgent(self.model)
         }
-        
-        return graph, agents
     
     async def initialize_session(self, session_id: Optional[str] = None) -> str:
         """Initialize a new conversation session"""
@@ -212,7 +175,7 @@ class ChatOrchestrator:
         return session_id
     
     async def process_chat_message(self, session_id: str, message: str) -> Dict[str, Any]:
-        """Process a chat message using the multi-agent graph system"""
+        """Process a chat message and route to appropriate agent if needed"""
         if session_id not in session_states:
             session_id = await self.initialize_session(session_id)
         
@@ -231,137 +194,91 @@ class ChatOrchestrator:
             serializable_context = self._make_json_serializable(session_state.get("context", {}))
             
             shared_memory.set(f"session_{session_id}_history", serializable_history)
-            shared_memory.set("user_request", message)
-            shared_memory.set("workflow_status", "initiated")
-            shared_memory.set("request_timestamp", datetime.now().isoformat())
+            shared_memory.set("current_user_message", message)
             shared_memory.set("session_context", serializable_context)
             
-            # Add request to history
-            if "request_history" not in shared_memory.data:
-                shared_memory.set("request_history", [])
+            # Let the orchestration agent decide what to do
+            orchestration_agent = self.agents['orchestration'].get_agent()
+            # Update shared memory using the proper method
+            self.agents['orchestration'].update_shared_memory()
             
-            request_history = shared_memory.get("request_history", [])
-            request_history.append({
-                "request": message,
-                "timestamp": datetime.now().isoformat()
+            # Create a context-aware prompt for the orchestrator
+            context_prompt = f"""
+User message: "{message}"
+
+Conversation history: {session_state["conversation_history"][-3:]}  # Last 3 messages for context
+
+Current session state: {session_state["conversation_state"]}
+
+Based on this message and context, decide if you need to route to a specialized agent or handle this conversationally.
+
+If routing to an agent:
+1. Explain what agent you're invoking and why
+2. Execute the agent
+3. Summarize the results for the user
+4. Suggest next steps
+
+If handling conversationally:
+1. Provide helpful guidance
+2. Answer questions about the system
+3. Ask clarifying questions if needed
+"""
+            
+            # Execute orchestration agent
+            orchestration_result = orchestration_agent(context_prompt)
+            
+            # Determine if orchestrator wants to route to a specific agent
+            routed_agent = None
+            agent_result = None
+            
+            orchestration_response = str(orchestration_result)
+            
+            # Check if orchestrator indicated it wants to route to a specific agent
+            if "routing to DetectAgent" in orchestration_response.lower() or "invoking detectagent" in orchestration_response.lower():
+                routed_agent = "DetectAgent"
+                agent_result = self._execute_agent('detect', message)
+                session_state["conversation_state"] = "detection_complete"
+                
+            elif "routing to driftanalyzeragent" in orchestration_response.lower() or "invoking analyzer" in orchestration_response.lower():
+                routed_agent = "DriftAnalyzerAgent"
+                agent_result = self._execute_agent('analyzer', message)
+                session_state["conversation_state"] = "analysis_complete"
+                
+            elif "routing to remediateagent" in orchestration_response.lower() or "invoking remediate" in orchestration_response.lower():
+                routed_agent = "RemediateAgent"
+                agent_result = self._execute_agent('remediate', message)
+                session_state["conversation_state"] = "remediation_complete"
+
+            elif "routing to reportagent" in orchestration_response.lower() or "invoking report" in orchestration_response.lower():
+                routed_agent = "ReportAgent"
+                agent_result = self._execute_agent('report', message)
+                session_state["conversation_state"] = "report_complete"
+            
+            # Generate suggestions based on current state
+            suggestions = self._generate_suggestions(session_state["conversation_state"], routed_agent)
+            
+            # Add assistant response to conversation history
+            session_state["conversation_history"].append({
+                "role": "assistant",
+                "message": orchestration_response,
+                "routed_agent": routed_agent,
+                "agent_result": agent_result,
+                "timestamp": datetime.now()
             })
-            shared_memory.set("request_history", request_history[-5:])  # Keep last 5 requests
             
-            # Execute the graph with the user input
-            result = self.graph.execute(message)
+            # Update session timestamp
+            session_state["timestamp"] = datetime.now()
             
-            # Process results from each agent
-            response_content = ""
-            routed_agents = []
-            agent_results = {}
-            debug_logs = []  # Thêm logs để debug
-            
-            for node_id, node_result in result.results.items():
-                agent_results_list = node_result.get_agent_results()
-                for i, agent_result in enumerate(agent_results_list):
-                    # Get agent from agents dictionary
-                    agent = self.agents.get(node_id)
-                    if agent:
-                        # Update agent status
-                        agent.update_agent_status(f"Processed request: {message[:50]}...")
-                    
-                    # Extract content from agent result
-                    content = ""
-                    if hasattr(agent_result.message, 'content'):
-                        message_content = agent_result.message["content"]
-                        if isinstance(message_content, list):
-                            for block in message_content:
-                                if isinstance(block, dict) and 'text' in block:
-                                    content += block['text']
-                        elif isinstance(message_content, str):
-                            content = message_content
-                        
-                        # If message is dict
-                        elif isinstance(agent_result.message, dict):
-                            if 'content' in agent_result.message:
-                                if isinstance(agent_result.message['content'], list):
-                                    for block in agent_result.message['content']:
-                                        if isinstance(block, dict) and 'text' in block:
-                                            content += block['text']
-                                elif isinstance(agent_result.message['content'], str):
-                                    content = agent_result.message['content']
-                    
-                    # If all fails, try to get string from message
-                    if not content and hasattr(agent_result, 'message'):
-                        content = str(agent_result.message)
-                    
-                    # Save to shared memory with valuable content
-                    shared_memory.set(f"{node_id}_response_{i}", {
-                        "content": content if content else agent_result.message if hasattr(agent_result, 'message') else "No extractable content",
-                        "timestamp": datetime.now().isoformat()
-                    })
-                    
-                    # Add to response content
-                    if content:
-                        response_content += f"\n\n🤖 {node_id.title()}Agent:\n{content}"
-                        routed_agents.append(node_id)
-                        agent_results[node_id] = content
-                    
-                    # Thêm debug logs
-                    debug_info = {
-                        "agent": node_id,
-                        "message_type": str(type(agent_result.message)),
-                        "content_length": len(content) if content else 0,
-                        "timestamp": datetime.now().isoformat()
-                    }
-                    debug_logs.append(debug_info)
-                
-                # Update workflow status
-                shared_memory.set("workflow_status", "completed")
-                shared_memory.set("completion_timestamp", datetime.now().isoformat())
-                
-                # Update conversation state based on agents that were executed
-                if "detect" in routed_agents:
-                    session_state["conversation_state"] = "detection_complete"
-                elif "analyzer" in routed_agents:
-                    session_state["conversation_state"] = "analysis_complete"
-                elif "remediate" in routed_agents:
-                    session_state["conversation_state"] = "remediation_complete"
-                elif "report" in routed_agents:
-                    session_state["conversation_state"] = "report_complete"
-                else:
-                    session_state["conversation_state"] = "conversational"
-                
-                # Generate suggestions based on current state
-                suggestions = self._generate_suggestions(session_state["conversation_state"], routed_agents[0] if routed_agents else None)
-                
-                # Add assistant response to conversation history
-                session_state["conversation_history"].append({
-                    "role": "assistant",
-                    "message": response_content,
-                    "routed_agents": routed_agents,
-                    "agent_results": agent_results,
-                    "timestamp": datetime.now()
-                })
-                
-                # Update session timestamp
-                session_state["timestamp"] = datetime.now()
-                
-                # Lưu debug logs vào session state
-                if "debug_mode" in session_state and session_state["debug_mode"]:
-                    if "debug_logs" not in session_state:
-                        session_state["debug_logs"] = []
-                    session_state["debug_logs"].extend(debug_logs)
-                    
-                    # Giới hạn số lượng logs lưu trữ
-                    if len(session_state["debug_logs"]) > 100:
-                        session_state["debug_logs"] = session_state["debug_logs"][-100:]
-                
             return {
                 "session_id": session_id,
-                "response": response_content,
-                "routed_agent": routed_agents[0] if routed_agents else None,
-                "agent_result": str(agent_results)[:1000] + "..." if len(str(agent_results)) > 1000 else str(agent_results),
+                "response": orchestration_response,
+                "routed_agent": routed_agent,
+                "agent_result": agent_result[:1000] + "..." if agent_result and len(agent_result) > 1000 else agent_result,
                 "conversation_state": session_state["conversation_state"],
                 "timestamp": datetime.now(),
                 "suggestions": suggestions
             }
-                
+            
         except Exception as e:
             logger.error(f"Error processing chat message: {e}")
             error_response = f"I encountered an error while processing your message: {str(e)}. Please try again or rephrase your request."
@@ -382,9 +299,29 @@ class ChatOrchestrator:
                 "timestamp": datetime.now(),
                 "suggestions": ["Try rephrasing your request", "Ask for help", "Check system status"]
             }
+
     
-    # Note: _execute_agent and _execute_agent_streaming methods removed
-    # The graph-based approach now handles agent execution directly
+    def _execute_agent(self, agent_type: str, user_message: str) -> str:
+        """Execute a specific agent and return its result"""
+        try:
+            agent = self.agents[agent_type].get_agent()
+            
+            # Update agent's shared memory
+            self.agents[agent_type].update_shared_memory()
+            
+            # Execute the agent
+            result = agent(user_message)
+            
+            # Store result in shared memory
+            shared_memory.set(f"{agent_type}_last_result", str(result))
+            
+            return str(result)
+            
+        except Exception as e:
+            logger.error(f"Error executing {agent_type} agent: {e}")
+            return f"Error executing {agent_type}: {str(e)}"
+    
+
     
     def _generate_suggestions(self, conversation_state: str, last_routed_agent: Optional[str]) -> list[str]:
         """Generate contextual suggestions for the user"""
@@ -407,12 +344,6 @@ class ChatOrchestrator:
                 "Ask for more details about the recommendations"
             ]
         elif conversation_state == "remediation_complete":
-            return [
-                "Ask me to run another drift detection",
-                "Request validation of the applied fixes",
-                "Start a new drift detection session"
-            ]
-        elif conversation_state == "report_complete":
             return [
                 "Ask me to run another drift detection",
                 "Request validation of the applied fixes",
@@ -464,6 +395,8 @@ async def chat(request: ChatMessage):
     except Exception as e:
         logger.error(f"Error in chat processing: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to process chat message: {e}")
+
+
 
 
 @app.post("/start-session", summary="Start New Chat Session")
@@ -534,6 +467,7 @@ async def get_shared_memory():
 
 
 
+
 @app.get("/system-status", response_model=SystemStatus, summary="Get System Status")
 async def get_system_status():
     """Get overall system status"""
@@ -546,7 +480,6 @@ async def get_system_status():
         system_health="healthy",
         terraform_dir=TERRAFORM_DIR
     )
-
 
 @app.delete("/session/{session_id}", summary="Clear Session")
 async def clear_session(session_id: str):
@@ -572,6 +505,201 @@ async def clear_all_sessions():
     shared_memory.clear()
     
     return {"message": "All sessions cleared, and shared memory reset"}
+
+@app.post("/upload-terraform", response_model=TerraformUploadResponse, summary="Upload Terraform File/Folder and Run Plan")
+async def upload_terraform_file(file: UploadFile = File(...)):
+    """
+    Upload a .tf file or a zip folder containing .tf files, replace existing terraform files, and run terraform plan
+    
+    This endpoint:
+    1. Validates that the uploaded file is a .tf file or .zip folder
+    2. If zip file, extracts only .tf files from the folder structure
+    3. Clears the current terraform directory
+    4. Saves the .tf files to the terraform directory
+    5. Runs terraform plan to generate/update the .tfstate file
+    
+    Returns the terraform plan results including any changes detected.
+    """
+    try:
+        # Validate file extension
+        if not file.filename:
+            raise HTTPException(
+                status_code=400, 
+                detail="No filename provided."
+            )
+        
+        is_zip = file.filename.lower().endswith('.zip')
+        is_tf = file.filename.lower().endswith('.tf')
+        
+        if not (is_zip or is_tf):
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid file type. Only .tf files or .zip folders are allowed."
+            )
+        
+        logger.info(f"Processing upload of {'zip folder' if is_zip else 'terraform file'}: {file.filename}")
+        
+        # Read file content
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Empty file uploaded")
+        
+        # Clear existing files in terraform directory (but preserve .terraform and .tfstate files)
+        terraform_dir = os.path.abspath(TERRAFORM_DIR)
+        
+        # Ensure terraform directory exists
+        os.makedirs(terraform_dir, exist_ok=True)
+        
+        # Remove existing .tf files, but preserve terraform state and cache
+        for tf_file in glob.glob(os.path.join(terraform_dir, "*.tf")):
+            try:
+                os.remove(tf_file)
+                logger.info(f"Removed existing terraform file: {tf_file}")
+            except Exception as e:
+                logger.warning(f"Could not remove {tf_file}: {e}")
+        
+        # Remove other non-essential files but keep .terraform directory and .tfstate files
+        for file_pattern in ["*.md", "*.txt"]:
+            for file_to_remove in glob.glob(os.path.join(terraform_dir, file_pattern)):
+                try:
+                    os.remove(file_to_remove)
+                    logger.info(f"Removed file: {file_to_remove}")
+                except Exception as e:
+                    logger.warning(f"Could not remove {file_to_remove}: {e}")
+        
+        extracted_files = []
+        
+        if is_zip:
+            # Handle zip folder upload
+            try:
+                # Create a temporary directory to extract files
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    # Save zip file to temp directory
+                    temp_zip_path = os.path.join(temp_dir, file.filename)
+                    with open(temp_zip_path, 'wb') as f:
+                        f.write(content)
+                    
+                    # Extract zip file
+                    with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
+                        zip_ref.extractall(temp_dir)
+                    
+                    # Find all .tf files in the extracted directory
+                    tf_files_found = []
+                    for root, dirs, files in os.walk(temp_dir):
+                        for file_name in files:
+                            if file_name.lower().endswith('.tf'):
+                                tf_files_found.append(os.path.join(root, file_name))
+                    
+                    if not tf_files_found:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="No .tf files found in the uploaded zip folder."
+                        )
+                    
+                    # Copy .tf files to terraform directory
+                    for tf_file_path in tf_files_found:
+                        file_name = os.path.basename(tf_file_path)
+                        dest_path = os.path.join(terraform_dir, file_name)
+                        
+                        # Handle duplicate filenames by adding a number suffix
+                        counter = 1
+                        original_name = file_name
+                        while os.path.exists(dest_path):
+                            name_without_ext = os.path.splitext(original_name)[0]
+                            ext = os.path.splitext(original_name)[1]
+                            file_name = f"{name_without_ext}_{counter}{ext}"
+                            dest_path = os.path.join(terraform_dir, file_name)
+                            counter += 1
+                        
+                        shutil.copy2(tf_file_path, dest_path)
+                        extracted_files.append(file_name)
+                        logger.info(f"Extracted and saved terraform file: {file_name}")
+                
+                logger.info(f"Successfully extracted {len(extracted_files)} .tf files from zip folder")
+                
+            except zipfile.BadZipFile:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid zip file format."
+                )
+            except Exception as e:
+                logger.error(f"Error processing zip file: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to process zip file: {str(e)}"
+                )
+        else:
+            # Handle single .tf file upload
+            new_file_path = os.path.join(terraform_dir, file.filename)
+            
+            with open(new_file_path, 'wb') as f:
+                f.write(content)
+            
+            extracted_files.append(file.filename)
+            logger.info(f"Saved terraform file: {new_file_path}")
+        
+        # Run terraform plan using MCP tools with ExecuteTerraformCommand from awblab
+        logger.info("Running terraform plan using ExecuteTerraformCommand from awblab MCP...")
+        
+        # First, try to initialize terraform if needed
+        logger.info("Initializing terraform...")
+        # init_result = terraform_run_command(
+        #     command="init",
+        #     working_directory=terraform_dir
+        # )
+        
+        # if not init_result.get("success", False):
+        #     logger.warning(f"Terraform init failed: {init_result.get('output', 'Unknown error')}")
+            # Continue anyway, as some configurations might not need init
+        
+        # Use terraform_run_command with ExecuteTerraformCommand from awblab MCP
+        logger.info("Running terraform plan using ExecuteTerraformCommand...")
+        plan_result = terraform_plan(
+            
+            terraform_dir=terraform_dir
+        )
+        apply_result = terraform_apply(
+            terraform_dir=terraform_dir,
+            auto_approve=True
+        )
+        
+        # Update shared memory with the upload results
+        shared_memory.set("last_uploaded_file", file.filename)
+        shared_memory.set("extracted_terraform_files", extracted_files)
+        shared_memory.set("terraform_plan_result", plan_result)
+        shared_memory.set("terraform_apply_result", apply_result)
+        shared_memory.set("terraform_directory", terraform_dir)
+        
+        success = plan_result.get("success", False)
+        
+        if success:
+            if is_zip:
+                message = f"Successfully uploaded zip folder '{file.filename}' with {len(extracted_files)} .tf files and ran terraform plan"
+            else:
+                message = f"Successfully uploaded {file.filename} and ran terraform plan"
+        else:
+            if is_zip:
+                message = f"Uploaded zip folder '{file.filename}' with {len(extracted_files)} .tf files but terraform plan encountered issues"
+            else:
+                message = f"Uploaded {file.filename} but terraform plan encountered issues"
+        return TerraformUploadResponse(
+            message=message,
+            filename=file.filename,
+            extracted_files=extracted_files,
+            terraform_plan_result=plan_result,
+            terraform_apply_result=apply_result,
+            success=success,
+            timestamp=datetime.now()
+        )
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading terraform file: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to upload and process terraform file: {str(e)}"
+        )
 
 
 @app.post("/generate-report", summary="Generate Drift Report")
@@ -829,200 +957,128 @@ async def get_report():
         )
 
 
-@app.post("/upload-terraform", response_model=TerraformUploadResponse, summary="Upload Terraform File/Folder and Run Plan")
-async def upload_terraform_file(file: UploadFile = File(...)):
+@app.get("/report-json", summary="Get Report in JSON Format")
+async def get_report_json():
+    """Get the report in JSON format with the specified structure."""
+    try:
+        # First check if report exists in shared memory
+        report = shared_memory.get("drift_json_report")
+        
+        if report:
+            return JSONResponse(content=report)
+        
+        # If not in memory, try to read from file
+        report_path = os.path.join(os.path.dirname(__file__), 'report.json')
+        
+        # Check if file exists
+        if not os.path.exists(report_path):
+            # No report available, generate an empty report structure
+            empty_report = {
+                "id": "no-scan",
+                "fileName": "none",
+                "scanDate": datetime.now().isoformat(),
+                "status": "not_started",
+                "totalResources": 0,
+                "driftCount": 0,
+                "riskLevel": "none",
+                "duration": "0s",
+                "createdBy": "system",
+                "createdOn": datetime.now().isoformat(),
+                "modifiedBy": "system",
+                "drifts": []
+            }
+            return JSONResponse(content=empty_report)
+        
+        # Read and parse JSON file
+        with open(report_path, 'r') as f:
+            report_content = json.load(f)
+        
+        return JSONResponse(content=report_content)
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing report.json: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error parsing report.json - invalid JSON format"
+        )
+    except Exception as e:
+        logger.error(f"Error reading report.json: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read report: {str(e)}"
+        )
+
+
+@app.get("/journal", summary="Get Daily Journal")
+async def get_daily_journal(date: Optional[str] = None):
     """
-    Upload a .tf file or a zip folder containing .tf files, replace existing terraform files, and run terraform plan
+    Retrieve the journal entries for a specific date or today's date.
     
-    This endpoint:
-    1. Validates that the uploaded file is a .tf file or .zip folder
-    2. If zip file, extracts only .tf files from the folder structure
-    3. Clears the current terraform directory
-    4. Saves the .tf files to the terraform directory
-    5. Runs terraform plan to generate/update the .tfstate file
+    Args:
+        date: Optional date string in YYYY-MM-DD format. Defaults to today.
     
-    Returns the terraform plan results including any changes detected.
+    Returns:
+        JSON response with parsed journal entries
     """
     try:
-        # Validate file extension
-        if not file.filename:
-            raise HTTPException(
-                status_code=400, 
-                detail="No filename provided."
-            )
+        # Get target date (today if not specified)
+        target_date = date if date else datetime.now().strftime("%Y-%m-%d")
+        journal_path = os.path.join("journal", f"{target_date}.md")
         
-        is_zip = file.filename.lower().endswith('.zip')
-        is_tf = file.filename.lower().endswith('.tf')
+        # Check if journal file exists
+        if not os.path.exists(journal_path):
+            return {
+                "date": target_date,
+                "entries": [],
+                "exists": False
+            }
         
-        if not (is_zip or is_tf):
-            raise HTTPException(
-                status_code=400, 
-                detail="Invalid file type. Only .tf files or .zip folders are allowed."
-            )
+        # Read journal file
+        with open(journal_path, 'r') as f:
+            content = f.read()
         
-        logger.info(f"Processing upload of {'zip folder' if is_zip else 'terraform file'}: {file.filename}")
+        # Parse journal entries
+        entries = []
+        current_entry = None
         
-        # Read file content
-        content = await file.read()
-        if not content:
-            raise HTTPException(status_code=400, detail="Empty file uploaded")
-        
-        # Clear existing files in terraform directory (but preserve .terraform and .tfstate files)
-        terraform_dir = os.path.abspath(TERRAFORM_DIR)
-        
-        # Ensure terraform directory exists
-        os.makedirs(terraform_dir, exist_ok=True)
-        
-        # Remove existing .tf files, but preserve terraform state and cache
-        for tf_file in glob.glob(os.path.join(terraform_dir, "*.tf")):
-            try:
-                os.remove(tf_file)
-                logger.info(f"Removed existing terraform file: {tf_file}")
-            except Exception as e:
-                logger.warning(f"Could not remove {tf_file}: {e}")
-        
-        # Remove other non-essential files but keep .terraform directory and .tfstate files
-        for file_pattern in ["*.md", "*.txt"]:
-            for file_to_remove in glob.glob(os.path.join(terraform_dir, file_pattern)):
-                try:
-                    os.remove(file_to_remove)
-                    logger.info(f"Removed file: {file_to_remove}")
-                except Exception as e:
-                    logger.warning(f"Could not remove {file_to_remove}: {e}")
-        
-        extracted_files = []
-        
-        if is_zip:
-            # Handle zip folder upload
-            try:
-                # Create a temporary directory to extract files
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    # Save zip file to temp directory
-                    temp_zip_path = os.path.join(temp_dir, file.filename)
-                    with open(temp_zip_path, 'wb') as f:
-                        f.write(content)
-                    
-                    # Extract zip file
-                    with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
-                        zip_ref.extractall(temp_dir)
-                    
-                    # Find all .tf files in the extracted directory
-                    tf_files_found = []
-                    for root, dirs, files in os.walk(temp_dir):
-                        for file_name in files:
-                            if file_name.lower().endswith('.tf'):
-                                tf_files_found.append(os.path.join(root, file_name))
-                    
-                    if not tf_files_found:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="No .tf files found in the uploaded zip folder."
-                        )
-                    
-                    # Copy .tf files to terraform directory
-                    for tf_file_path in tf_files_found:
-                        file_name = os.path.basename(tf_file_path)
-                        dest_path = os.path.join(terraform_dir, file_name)
-                        
-                        # Handle duplicate filenames by adding a number suffix
-                        counter = 1
-                        original_name = file_name
-                        while os.path.exists(dest_path):
-                            name_without_ext = os.path.splitext(original_name)[0]
-                            ext = os.path.splitext(original_name)[1]
-                            file_name = f"{name_without_ext}_{counter}{ext}"
-                            dest_path = os.path.join(terraform_dir, file_name)
-                            counter += 1
-                        
-                        shutil.copy2(tf_file_path, dest_path)
-                        extracted_files.append(file_name)
-                        logger.info(f"Extracted and saved terraform file: {file_name}")
+        for line in content.split('\n'):
+            if line.startswith('## '):
+                # New entry found
+                if current_entry:
+                    entries.append(current_entry)
                 
-                logger.info(f"Successfully extracted {len(extracted_files)} .tf files from zip folder")
-                
-            except zipfile.BadZipFile:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Invalid zip file format."
-                )
-            except Exception as e:
-                logger.error(f"Error processing zip file: {e}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to process zip file: {str(e)}"
-                )
-        else:
-            # Handle single .tf file upload
-            new_file_path = os.path.join(terraform_dir, file.filename)
-            
-            with open(new_file_path, 'wb') as f:
-                f.write(content)
-            
-            extracted_files.append(file.filename)
-            logger.info(f"Saved terraform file: {new_file_path}")
+                # Extract timestamp
+                timestamp = line.replace('## ', '').strip()
+                current_entry = {
+                    "timestamp": timestamp,
+                    "content": "",
+                    "full_timestamp": f"{target_date} {timestamp}"
+                }
+            elif current_entry and line.strip():
+                # Add content to current entry
+                if current_entry["content"]:
+                    current_entry["content"] += "\n" + line
+                else:
+                    current_entry["content"] = line
         
-        # Run terraform plan using MCP tools with ExecuteTerraformCommand from awblab
-        logger.info("Running terraform plan using ExecuteTerraformCommand from awblab MCP...")
+        # Add the last entry if it exists
+        if current_entry:
+            entries.append(current_entry)
         
-        # First, try to initialize terraform if needed
-        logger.info("Initializing terraform...")
-        # init_result = terraform_run_command(
-        #     command="init",
-        #     working_directory=terraform_dir
-        # )
+        return {
+            "date": target_date,
+            "entries": entries,
+            "exists": True,
+            "count": len(entries)
+        }
         
-        # if not init_result.get("success", False):
-        #     logger.warning(f"Terraform init failed: {init_result.get('output', 'Unknown error')}")
-            # Continue anyway, as some configurations might not need init
-        
-        # Use terraform_run_command with ExecuteTerraformCommand from awblab MCP
-        logger.info("Running terraform plan using ExecuteTerraformCommand...")
-        plan_result = terraform_plan(
-            
-            terraform_dir=terraform_dir
-        )
-        apply_result = terraform_apply(
-            terraform_dir=terraform_dir,
-            auto_approve=True
-        )
-        
-        # Update shared memory with the upload results
-        shared_memory.set("last_uploaded_file", file.filename)
-        shared_memory.set("extracted_terraform_files", extracted_files)
-        shared_memory.set("terraform_plan_result", plan_result)
-        shared_memory.set("terraform_apply_result", apply_result)
-        shared_memory.set("terraform_directory", terraform_dir)
-        
-        success = plan_result.get("success", False)
-        
-        if success:
-            if is_zip:
-                message = f"Successfully uploaded zip folder '{file.filename}' with {len(extracted_files)} .tf files and ran terraform plan"
-            else:
-                message = f"Successfully uploaded {file.filename} and ran terraform plan"
-        else:
-            if is_zip:
-                message = f"Uploaded zip folder '{file.filename}' with {len(extracted_files)} .tf files but terraform plan encountered issues"
-            else:
-                message = f"Uploaded {file.filename} but terraform plan encountered issues"
-        return TerraformUploadResponse(
-            message=message,
-            filename=file.filename,
-            extracted_files=extracted_files,
-            terraform_plan_result=plan_result,
-            terraform_apply_result=apply_result,
-            success=success,
-            timestamp=datetime.now()
-        )
-    except HTTPException:
-        # Re-raise HTTP exceptions
-        raise
     except Exception as e:
-        logger.error(f"Error uploading terraform file: {e}")
+        logger.error(f"Error retrieving journal: {e}")
         raise HTTPException(
-            status_code=500, 
-            detail=f"Failed to upload and process terraform file: {str(e)}"
+            status_code=500,
+            detail=f"Failed to retrieve journal: {str(e)}"
         )
+
 
 if __name__ == "__main__":
     # Ensure terraform directory exists
