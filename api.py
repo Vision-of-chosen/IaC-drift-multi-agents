@@ -1354,21 +1354,90 @@ async def upload_terraform_file(
         )
 
 
-@app.post("/generate-report", summary="Generate Drift Report")
-async def generate_report():
-    """Generate a JSON report of drift detection results"""
+@app.get("/report", summary="Get or Generate Drift Report")
+async def get_report(
+    session_id: Optional[str] = None,
+    session_id_header: Optional[str] = Depends(get_session_id_from_header),
+    generate: bool = False,
+    report_filename: Optional[str] = None
+):
+    """Get or generate a JSON report of drift detection results
+    
+    Args:
+        session_id: Optional session ID to use for report generation/retrieval
+        session_id_header: Session ID from request header
+        generate: If True, force generation of a new report even if one exists
+        report_filename: Optional custom filename for the generated report
+        
+    Returns:
+        JSON response with report details and content
+    """
     try:
+        # Use session_id from header if available, otherwise from parameter
+        session_id = session_id_header or session_id
+        
+        if not session_id:
+            # Generate a new session ID if none provided
+            session_id = str(uuid.uuid4())
+            logger.info(f"No session ID provided, generated new one: {session_id}")
+        
+        # Set the session in shared memory
+        shared_memory.set_session(session_id)
+        
+        # Check if we already have a report for this session
+        existing_report = None if generate else shared_memory.get("drift_json_report", session_id=session_id)
+        existing_filename = shared_memory.get("drift_report_file", session_id=session_id)
+        
+        if existing_report and not generate and os.path.exists(existing_filename):
+            logger.info(f"Using existing report for session {session_id}: {existing_filename}")
+            
+            # Read the existing report file
+            try:
+                with open(existing_filename, "r") as f:
+                    report_content = json.load(f)
+            except Exception as e:
+                logger.error(f"Error reading existing report file: {e}")
+                report_content = {"error": f"Could not read existing report file: {e}"}
+                
+            # Return existing report
+            return {
+                "message": "Retrieved existing report",
+                "session_id": session_id,
+                "file_path": existing_filename,
+                "scan_details": {
+                    "id": existing_report.get("scanDetails", {}).get("id"),
+                    "fileName": existing_report.get("scanDetails", {}).get("fileName"),
+                    "scanDate": existing_report.get("scanDetails", {}).get("scanDate"),
+                    "status": existing_report.get("scanDetails", {}).get("status"),
+                    "totalResources": existing_report.get("scanDetails", {}).get("totalResources"),
+                    "driftCount": existing_report.get("scanDetails", {}).get("driftCount"),
+                    "riskLevel": existing_report.get("scanDetails", {}).get("riskLevel")
+                },
+                "total_drifts": len(existing_report.get("drifts", [])),
+                "report_content": report_content,
+                "newly_generated": False
+            }
+        
+        # No existing report or generation requested - generate a new one
         # Access the report agent
         report_agent = orchestrator.agents.get('report')
         if not report_agent:
             raise HTTPException(status_code=404, detail="Report agent not available")
             
+        # Generate unique filename for this session if not provided
+        if not report_filename:
+            report_filename = f"report_{session_id}.json"
+        
         # Generate the report
-        report = report_agent.generate_json_report("report.json")
+        report = report_agent.generate_json_report(report_filename)
+        
+        # Store report in shared memory with session ID
+        shared_memory.set("drift_json_report", report, session_id)
+        shared_memory.set("drift_report_file", report_filename, session_id)
         
         # Read the report file to return in response
         try:
-            with open("report.json", "r") as f:
+            with open(report_filename, "r") as f:
                 report_content = json.load(f)
         except Exception as e:
             logger.error(f"Error reading report file: {e}")
@@ -1377,7 +1446,8 @@ async def generate_report():
         # Return report details and content
         return {
             "message": "Report generated successfully",
-            "file_path": "report.json",
+            "session_id": session_id,
+            "file_path": report_filename,
             "scan_details": {
                 "id": report.get("scanDetails", {}).get("id"),
                 "fileName": report.get("scanDetails", {}).get("fileName"),
@@ -1388,12 +1458,13 @@ async def generate_report():
                 "riskLevel": report.get("scanDetails", {}).get("riskLevel")
             },
             "total_drifts": len(report.get("drifts", [])),
-            "report_content": report_content
+            "report_content": report_content,
+            "newly_generated": True
         }
             
     except Exception as e:
-        logger.error(f"Error generating report: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate report: {e}")
+        logger.error(f"Error handling report: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to process report request: {e}")
 
 
 @app.get("/terraform-status", summary="Get Terraform Files Status")
@@ -1692,116 +1763,64 @@ async def get_debug_logs(session_id: str):
     }
 
 
-@app.get("/report", summary="Get Report Content")
-async def get_report():
-    """Get the contents of report.json file"""
-    try:
-        report_path = os.path.join(os.path.dirname(__file__), 'report.json')
-        
-        # Check if file exists
-        if not os.path.exists(report_path):
-            raise HTTPException(
-                status_code=404,
-                detail="report.json not found"
-            )
-            
-        # Read and parse JSON file
-        with open(report_path, 'r') as f:
-            report_content = json.load(f)
-            
-        return JSONResponse(
-            content=report_content,
-            status_code=200
-        )
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"Error parsing report.json: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Error parsing report.json - invalid JSON format"
-        )
-    except Exception as e:
-        logger.error(f"Error reading report.json: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to read report.json: {str(e)}"
-        )
-
-
-@app.get("/report-json", summary="Get Report in JSON Format")
-async def get_report_json():
-    """Get the report in JSON format with the specified structure."""
-    try:
-        # First check if report exists in shared memory
-        report = shared_memory.get("drift_json_report")
-        
-        if report:
-            return JSONResponse(content=report)
-        
-        # If not in memory, try to read from file
-        report_path = os.path.join(os.path.dirname(__file__), 'report.json')
-        
-        # Check if file exists
-        if not os.path.exists(report_path):
-            # No report available, generate an empty report structure
-            empty_report = {
-                "id": "no-scan",
-                "fileName": "none",
-                "scanDate": datetime.now().isoformat(),
-                "status": "not_started",
-                "totalResources": 0,
-                "driftCount": 0,
-                "riskLevel": "none",
-                "duration": "0s",
-                "createdBy": "system",
-                "createdOn": datetime.now().isoformat(),
-                "modifiedBy": "system",
-                "drifts": []
-            }
-            return JSONResponse(content=empty_report)
-        
-        # Read and parse JSON file
-        with open(report_path, 'r') as f:
-            report_content = json.load(f)
-        
-        return JSONResponse(content=report_content)
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"Error parsing report.json: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Error parsing report.json - invalid JSON format"
-        )
-    except Exception as e:
-        logger.error(f"Error reading report.json: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to read report: {str(e)}"
-        )
-
-
 @app.get("/journal", summary="Get Daily Journal")
-async def get_daily_journal(date: Optional[str] = None):
+async def get_daily_journal(
+    date: Optional[str] = None,
+    session_id: Optional[str] = None,
+    session_id_header: Optional[str] = Depends(get_session_id_from_header)
+):
     """
     Retrieve the journal entries for a specific date or today's date.
     
     Args:
         date: Optional date string in YYYY-MM-DD format. Defaults to today.
-    
+        session_id: Optional session ID to retrieve journal entries for
+        session_id_header: Optional session ID from X-Session-ID header
+        
     Returns:
         JSON response with parsed journal entries
     """
     try:
+        # Use session_id from header if available, otherwise from parameter
+        session_id = session_id_header or session_id
+        
         # Get target date (today if not specified)
         target_date = date if date else datetime.now().strftime("%Y-%m-%d")
+        
+        # Check if we have a session ID
+        if session_id:
+            # Set the current session in shared memory
+            shared_memory.set_session(session_id)
+            
+            # Try to get journal entries from shared memory first
+            journal_key = f"journal_{target_date}"
+            journal_entries = shared_memory.get(journal_key, session_id=session_id)
+            
+            if journal_entries:
+                logger.info(f"Retrieved journal entries for {target_date} from shared memory for session {session_id}")
+                return {
+                    "date": target_date,
+                    "entries": journal_entries,
+                    "exists": True,
+                    "count": len(journal_entries),
+                    "source": "shared_memory",
+                    "session_id": session_id
+                }
+        
+        # If no session_id or no entries in shared memory, fall back to file system
         journal_path = os.path.join("journal", f"{target_date}.md")
         
         # Check if journal file exists
         if not os.path.exists(journal_path):
+            # If we have a session ID, create an empty journal entry in shared memory
+            if session_id:
+                shared_memory.set(f"journal_{target_date}", [], session_id)
+            
             return {
                 "date": target_date,
                 "entries": [],
-                "exists": False
+                "exists": False,
+                "session_id": session_id
             }
         
         # Read journal file
@@ -1836,11 +1855,18 @@ async def get_daily_journal(date: Optional[str] = None):
         if current_entry:
             entries.append(current_entry)
         
+        # If we have a session ID, store entries in shared memory
+        if session_id:
+            shared_memory.set(f"journal_{target_date}", entries, session_id)
+            logger.info(f"Stored journal entries for {target_date} in shared memory for session {session_id}")
+        
         return {
             "date": target_date,
             "entries": entries,
             "exists": True,
-            "count": len(entries)
+            "count": len(entries),
+            "source": "file",
+            "session_id": session_id
         }
         
     except Exception as e:
@@ -1849,6 +1875,7 @@ async def get_daily_journal(date: Optional[str] = None):
             status_code=500,
             detail=f"Failed to retrieve journal: {str(e)}"
         )
+
 @app.post("/setup-notifications", summary="Setup Email Notifications for AWS Changes")
 async def setup_notifications(config: NotificationConfig):
     """

@@ -363,18 +363,58 @@ sns = boto3.client('sns')
 SNS_TOPIC_ARN = "{sns_topic_arn}"
 
 def is_drift_event(event_name):
-    return re.search(r'(Put|Delete|Modify|Create|Start|Stop|Run|Attach|Authorize|Terminate)', event_name, re.IGNORECASE)
+    return re.search(r'(Put|Delete|Modify|Create|Start|Stop|Run|Attach|Authorize|Terminate|Reboot|Describe)', event_name, re.IGNORECASE)
 
 IGNORED_SOURCES = [
     "logs.amazonaws.com",
     "cloudtrail.amazonaws.com"
 ]
 
+def get_resource_type(source, event_name, detail):
+    """Determine the resource type based on event details"""
+    if source == "ec2.amazonaws.com":
+        # Handle EC2 specific events
+        if "instance" in event_name.lower():
+            return "EC2 Instance"
+        elif "vpc" in event_name.lower():
+            return "VPC"
+        elif "subnet" in event_name.lower():
+            return "Subnet"
+        elif "security-group" in event_name.lower():
+            return "Security Group"
+        else:
+            return "EC2 Resource"
+    elif source == "s3.amazonaws.com":
+        return "S3 Bucket"
+    elif source == "iam.amazonaws.com":
+        return "IAM Resource"
+    elif source == "lambda.amazonaws.com":
+        return "Lambda Function"
+    elif source == "dynamodb.amazonaws.com":
+        return "DynamoDB Table"
+    else:
+        return "AWS Resource"
+
 def lambda_handler(event, context):
     detail = event.get("detail", {{}})
     event_name = detail.get("eventName", "unknown")
     source = detail.get("eventSource", "")
     user = detail.get("userIdentity", {{}}).get("arn", "unknown")
+    
+    # Extract resource information
+    resource_type = get_resource_type(source, event_name, detail)
+    
+    # Try to extract specific resource ID/name
+    resource_id = "Unknown"
+    if source == "ec2.amazonaws.com":
+        # Extract EC2 instance ID if available
+        request_params = detail.get("requestParameters", {{}})
+        if "instanceId" in request_params:
+            resource_id = request_params["instanceId"]
+        elif "instancesSet" in request_params:
+            instances = request_params.get("instancesSet", {{}}).get("items", [])
+            if instances:
+                resource_id = instances[0].get("instanceId", "Unknown")
     
     event_time_utc = detail.get("eventTime", datetime.utcnow().isoformat())
     try:
@@ -399,7 +439,7 @@ Hệ thống vừa ghi nhận một thay đổi cấu hình trong môi trường
 
 🔹 THÔNG TIN CHI TIẾT:: 
     - Sự kiện                   : {{event_name}}
-    - Tài nguyên liên quan      : IAM User
+    - Tài nguyên liên quan      : {{resource_type}} ({{resource_id}})
     - Thời gian ghi nhận        : {{formatted_time}}
     - Tài khoản thực hiện       : {{user}}
     - Nguồn                     : {{source}}
@@ -424,7 +464,7 @@ GeniDetect
 """
         sns.publish(
             TopicArn=SNS_TOPIC_ARN,
-            Subject=f"[CẢNH BÁO DRIFT] {{event_name}}",
+            Subject=f"[CẢNH BÁO DRIFT] {{event_name}} - {{resource_type}}",
             Message=message
         )
         return {{
@@ -550,8 +590,35 @@ GeniDetect
                         "prefix": "Modify"
                     }, {
                         "prefix": "Put"
+                    }, {
+                        "prefix": "Run"
+                    }, {
+                        "prefix": "Start"
+                    }, {
+                        "prefix": "Stop"
+                    }, {
+                        "prefix": "Terminate"
+                    }, {
+                        "prefix": "Reboot"
+                    }, {
+                        "prefix": "Attach"
+                    }, {
+                        "prefix": "Detach"
+                    }, {
+                        "prefix": "Allocate"
+                    }, {
+                        "prefix": "Associate"
+                    }, {
+                        "prefix": "Disassociate"
                     }]
                 }
+            }
+            
+            # Create a separate rule specifically for EC2 state changes
+            ec2_state_rule_name = f"{rule_name}-EC2StateChanges"
+            ec2_state_pattern = {
+                "source": ["aws.ec2"],
+                "detail-type": ["EC2 Instance State-change Notification"]
             }
             
             # Create the EventBridge rule
@@ -563,6 +630,16 @@ GeniDetect
             )
             
             rule_arn = rule_response['RuleArn']
+            
+            # Create EC2 state change rule
+            ec2_rule_response = events_client.put_rule(
+                Name=ec2_state_rule_name,
+                EventPattern=json.dumps(ec2_state_pattern),
+                State='ENABLED',
+                Description=f'Detect EC2 instance state changes for drift notification'
+            )
+            
+            ec2_rule_arn = ec2_rule_response['RuleArn']
             
             # Create Lambda function for processing events
             lambda_result = self._create_lambda_function()
@@ -643,6 +720,31 @@ GeniDetect
                 ]
             )
             
+            # Add permission for EventBridge to invoke the Lambda function for EC2 state changes
+            try:
+                lambda_client.add_permission(
+                    FunctionName='DriftDetectionFunction',
+                    StatementId=f'EventBridge-{ec2_state_rule_name}',
+                    Action='lambda:InvokeFunction',
+                    Principal='events.amazonaws.com',
+                    SourceArn=ec2_rule_arn
+                )
+            except ClientError as e:
+                # If the permission already exists, continue
+                if 'ResourceConflictException' not in str(e):
+                    raise e
+            
+            # Add Lambda as target for the EC2 state change rule
+            ec2_target_response = events_client.put_targets(
+                Rule=ec2_state_rule_name,
+                Targets=[
+                    {
+                        'Id': 'EC2StateDriftDetectionLambdaTarget',
+                        'Arn': lambda_function_arn
+                    }
+                ]
+            )
+            
             # Enable S3 to send events to EventBridge for all buckets
             s3_client = boto3.client('s3', region_name=self.aws_region)
             
@@ -672,6 +774,8 @@ GeniDetect
                 "rule_arn": rule_arn,
                 "s3_rule_name": s3_rule_name,
                 "s3_rule_arn": s3_rule_arn,
+                "ec2_rule_name": ec2_state_rule_name,
+                "ec2_rule_arn": ec2_rule_arn,
                 "lambda_function_arn": lambda_function_arn,
                 "resource_types": resource_types,
                 "creation_time": datetime.now().isoformat()
@@ -684,6 +788,7 @@ GeniDetect
                 "message": f"EventBridge rules and Lambda function created successfully",
                 "rule_arn": rule_arn,
                 "s3_rule_arn": s3_rule_arn,
+                "ec2_rule_arn": ec2_rule_arn,
                 "lambda_function_arn": lambda_function_arn,
                 "resource_types": resource_types
             }
