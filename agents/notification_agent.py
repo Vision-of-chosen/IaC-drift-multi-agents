@@ -53,7 +53,8 @@ class NotificationAgent:
         """Initialize the notification agent with a language model."""
         self.model = model
         self.agent = self._create_agent()
-        self.recipient_email = "nguyenxuanlamnghean123@gmail.com"  # Default recipient
+        self.recipient_email = "nguyenxuanlamnghean123@gmail.com"  # Default recipient for backward compatibility
+        self.recipient_emails = ["nguyenxuanlamnghean123@gmail.com"]  # Default recipient list
         self.aws_region = os.environ.get("AWS_REGION", BEDROCK_REGION)
         self.sns_topic_arn = None
         self.eventbridge_rule_name = "DriftDetectionRule"
@@ -105,38 +106,48 @@ class NotificationAgent:
         )
         return agent
     
-    def set_recipient_email(self, email: str) -> Dict[str, Any]:
+    def set_recipient_email(self, emails: List[str]) -> Dict[str, Any]:
         """
-        Set the recipient email address for notifications.
+        Set the recipient email addresses for notifications.
         
         Args:
-            email: Email address to send notifications to
+            emails: List of email addresses to send notifications to
             
         Returns:
             Dict with status and message
         """
         try:
-            # Validate email format (basic validation)
-            if '@' not in email or '.' not in email:
+            # Validate email format for all emails (basic validation)
+            invalid_emails = []
+            for email in emails:
+                if '@' not in email or '.' not in email:
+                    invalid_emails.append(email)
+            
+            if invalid_emails:
                 return {
                     "status": "error",
-                    "message": f"Invalid email format: {email}"
+                    "message": f"Invalid email format for: {', '.join(invalid_emails)}"
                 }
             
-            # Set the recipient email
-            self.recipient_email = email
+            # Set the recipient emails
+            self.recipient_emails = emails
+            # For backward compatibility, also set the first email as recipient_email
+            if emails:
+                self.recipient_email = emails[0]
             
             # Update shared memory
-            shared_memory.set("notification_recipient_email", email)
+            shared_memory.set("notification_recipient_emails", emails)
+            if emails:
+                shared_memory.set("notification_recipient_email", emails[0])
             
-            logger.info(f"Notification recipient email set to: {email}")
+            logger.info(f"Notification recipient emails set to: {emails}")
             
             return {
                 "status": "success",
-                "message": f"Recipient email set to: {email}"
+                "message": f"Recipient emails set to: {emails}"
             }
         except Exception as e:
-            error_msg = f"Error setting recipient email: {str(e)}"
+            error_msg = f"Error setting recipient emails: {str(e)}"
             logger.error(error_msg)
             return {
                 "status": "error",
@@ -190,7 +201,7 @@ class NotificationAgent:
     
     def _setup_sns_topic(self, topic_name: str = "DriftAlertTopic") -> Dict[str, Any]:
         """
-        Set up an SNS topic for drift notifications and subscribe the recipient email.
+        Set up an SNS topic for drift notifications and subscribe all recipient emails.
         
         Args:
             topic_name: Name of the SNS topic to create
@@ -210,12 +221,16 @@ class NotificationAgent:
             self.sns_topic_arn = topic_arn
             shared_memory.set("notification_sns_topic_arn", topic_arn)
             
-            # Subscribe email to topic
-            subscription_response = sns_client.subscribe(
-                TopicArn=topic_arn,
-                Protocol='email',
-                Endpoint=self.recipient_email
-            )
+            # Subscribe all emails to topic
+            subscription_arns = []
+            for email in self.recipient_emails:
+                subscription_response = sns_client.subscribe(
+                    TopicArn=topic_arn,
+                    Protocol='email',
+                    Endpoint=email
+                )
+                subscription_arns.append(subscription_response.get('SubscriptionArn', 'pending confirmation'))
+                logger.info(f"Email subscription created for {email}: {subscription_response.get('SubscriptionArn', 'pending confirmation')}")
             
             # Add topic tags
             sns_client.tag_resource(
@@ -233,13 +248,13 @@ class NotificationAgent:
             )
             
             logger.info(f"SNS topic created: {topic_arn}")
-            logger.info(f"Email subscription created: {subscription_response['SubscriptionArn']}")
             
             return {
                 "status": "success",
-                "message": f"SNS topic created and email {self.recipient_email} subscribed",
+                "message": f"SNS topic created and {len(self.recipient_emails)} emails subscribed",
                 "topic_arn": topic_arn,
-                "subscription_arn": subscription_response.get('SubscriptionArn', 'pending confirmation')
+                "subscription_arns": subscription_arns,
+                "emails": self.recipient_emails
             }
             
         except ClientError as e:
@@ -797,31 +812,54 @@ GeniDetect
     
     def _send_test_notification(self, subject: str = "Test Drift Notification", message: str = "This is a test notification from the Drift Detection System.") -> Dict[str, Any]:
         """
-        Send a test notification to verify the notification system.
+        Send a test notification to all subscribed emails.
         
         Args:
-            subject: The subject line for the notification email
-            message: The message body for the notification email
+            subject: Subject line for the notification email
+            message: Message body for the notification email
             
         Returns:
             Dict with status and message
         """
         try:
+            # Check if SNS topic ARN is set
+            if not self.sns_topic_arn:
+                # Try to retrieve from shared memory
+                self.sns_topic_arn = shared_memory.get("notification_sns_topic_arn")
+                
+                # If still not available, set up the SNS topic
+                if not self.sns_topic_arn:
+                    sns_result = self._setup_sns_topic()
+                    if sns_result.get("status") != "success":
+                        return sns_result
+                    self.sns_topic_arn = sns_result.get("topic_arn")
+            
             # Create SNS client
             sns_client = boto3.client('sns', region_name=self.aws_region)
             
-            # Publish a test message to the SNS topic
+            # Publish message to SNS topic
             response = sns_client.publish(
                 TopicArn=self.sns_topic_arn,
                 Subject=subject,
                 Message=message
             )
             
-            logger.info(f"Test notification sent. Message ID: {response['MessageId']}")
+            # Update shared memory
+            shared_memory.set("last_notification_sent", {
+                "timestamp": datetime.now().isoformat(),
+                "subject": subject,
+                "message": message,
+                "message_id": response.get("MessageId"),
+                "recipient_emails": self.recipient_emails
+            })
+            
+            logger.info(f"Test notification sent: {response.get('MessageId')}")
             
             return {
                 "status": "success",
-                "message": "Test notification sent successfully."
+                "message": f"Test notification sent to {len(self.recipient_emails)} email(s): {', '.join(self.recipient_emails)}",
+                "message_id": response.get("MessageId"),
+                "recipient_emails": self.recipient_emails
             }
             
         except ClientError as e:

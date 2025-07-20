@@ -129,7 +129,7 @@ class AWSCredentials(BaseModel):
     user_id: Optional[str] = Field(None, description="User ID for credential association")
 
 class NotificationConfig(BaseModel):
-    recipient_email: str = Field(..., description="Email address to receive notifications")
+    recipient_emails: List[str] = Field(..., description="List of email addresses to receive notifications")
     resource_types: Optional[List[str]] = Field(None, description="List of AWS resource types to monitor")
     setup_aws_config: bool = Field(False, description="Whether to set up AWS Config for drift detection")
     include_global_resources: bool = Field(True, description="Whether to include global resources in monitoring")
@@ -1872,7 +1872,7 @@ async def setup_notifications(config: NotificationConfig):
             raise HTTPException(status_code=404, detail="Notification agent not available")
         
         # Set recipient email
-        email_result = notification_agent.set_recipient_email(config.recipient_email)
+        email_result = notification_agent.set_recipient_email(config.recipient_emails)
         if email_result.get("status") != "success":
             raise HTTPException(
                 status_code=400,
@@ -1881,7 +1881,7 @@ async def setup_notifications(config: NotificationConfig):
         
         # Store configuration in shared memory
         shared_memory.set("notification_config", {
-            "recipient_email": config.recipient_email,
+            "recipient_emails": config.recipient_emails,
             "resource_types": config.resource_types,
             "setup_aws_config": config.setup_aws_config,
             "include_global_resources": config.include_global_resources,
@@ -1892,7 +1892,7 @@ async def setup_notifications(config: NotificationConfig):
         monitoring_result = notification_agent.start_continuous_monitoring()
         
         return {
-            "message": f"AWS-native notification monitoring setup successfully for {config.recipient_email}",
+            "message": f"AWS-native notification monitoring setup successfully for {config.recipient_emails}",
             "resource_types": config.resource_types or "All critical resources",
             "aws_config_enabled": config.setup_aws_config,
             "monitoring_status": monitoring_result,
@@ -1932,7 +1932,7 @@ async def get_notification_status():
         
         return {
             "monitoring_active": monitoring_active,
-            "recipient_email": notification_config.get("recipient_email"),
+            "recipient_emails": notification_config.get("recipient_emails"),
             "resource_types": notification_config.get("resource_types"),
             "setup_time": notification_config.get("setup_time"),
             "last_notification_sent": last_notification,
