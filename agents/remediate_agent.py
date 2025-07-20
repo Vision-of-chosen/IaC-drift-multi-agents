@@ -117,14 +117,25 @@ class RemediateAgent:
             if session_id:
                 session_key = f"remediate_{session_id}"
                 self.agent.state.aws_session_key = session_key
+                
+                # Get session-specific terraform directory if available
+                session_terraform_dir = shared_memory.get("session_terraform_dir", session_id=session_id)
+                if session_terraform_dir:
+                    self.agent.state.terraform_dir = session_terraform_dir
+                    logger.info(f"Updated RemediateAgent to use session-specific terraform directory: {session_terraform_dir}")
         else:
             session_id = shared_memory.get_current_session()
             session_key = f"remediate_{session_id}" if session_id else None
             
+            # Get session-specific terraform directory if available
+            session_terraform_dir = None
+            if session_id:
+                session_terraform_dir = shared_memory.get("session_terraform_dir", session_id=session_id)
+            
             self.agent.state = AgentState({
                 "shared_memory": shared_memory.data,
                 "agent_type": "remediation",
-                "terraform_dir": self.terraform_dir,
+                "terraform_dir": session_terraform_dir if session_terraform_dir else self.terraform_dir,
                 "aws_region": self.region,
                 "aws_session_key": session_key
             })

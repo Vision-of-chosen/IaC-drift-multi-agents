@@ -156,15 +156,27 @@ class DetectAgent:
             if session_id:
                 session_key = f"detection_{session_id}"
                 self.agent.state.aws_session_key = session_key
+                
+                # Get session-specific terraform directory if available
+                session_terraform_dir = shared_memory.get("session_terraform_dir", session_id=session_id)
+                if session_terraform_dir:
+                    self.agent.state.terraform_dir = session_terraform_dir
+                    logger.info(f"Updated DetectAgent to use session-specific terraform directory: {session_terraform_dir}")
         else:
             session_id = shared_memory.get_current_session()
             session_key = f"detection_{session_id}" if session_id else None
+            
+            # Get session-specific terraform directory if available
+            session_terraform_dir = None
+            if session_id:
+                session_terraform_dir = shared_memory.get("session_terraform_dir", session_id=session_id)
             
             self.agent.state = AgentState({
                 "shared_memory": shared_memory.data,
                 "agent_type": "detection",
                 "aws_region": self.region,  # Preserve the AWS region in state updates
-                "aws_session_key": session_key
+                "aws_session_key": session_key,
+                "terraform_dir": session_terraform_dir if session_terraform_dir else None
             })
     
     def read_terraform_state(self, file_path=None) -> dict:
@@ -184,6 +196,18 @@ class DetectAgent:
         
         try:
             logger.info("Attempting to use read_tfstate tool")
+            
+            # If no file_path provided, try to use session-specific directory
+            if not file_path:
+                session_id = shared_memory.get_current_session()
+                if session_id:
+                    session_terraform_dir = shared_memory.get("session_terraform_dir", session_id=session_id)
+                    if session_terraform_dir:
+                        potential_state_file = os.path.join(session_terraform_dir, "terraform.tfstate")
+                        if os.path.exists(potential_state_file):
+                            file_path = potential_state_file
+                            logger.info(f"Using session-specific terraform state file: {file_path}")
+            
             # Call the read_tfstate tool to get the Terraform state
             inputs = {}
             if file_path:
@@ -212,15 +236,35 @@ class DetectAgent:
         """Read Terraform state file directly and store in shared memory"""
         # Try default paths if no file_path provided
         if not file_path:
-            potential_paths = [
+            # Get session-specific terraform directory if available
+            session_id = shared_memory.get_current_session()
+            session_terraform_dir = None
+            if session_id:
+                session_terraform_dir = shared_memory.get("session_terraform_dir", session_id=session_id)
+            
+            # Create potential paths list based on available directories
+            potential_paths = []
+            
+            # Add paths with session-specific directory if available
+            if session_terraform_dir:
+                potential_paths.extend([
+                    os.path.join(session_terraform_dir, "terraform.tfstate"),
+                    os.path.join(session_terraform_dir, ".terraform", "terraform.tfstate")
+                ])
+            
+            # Add default paths as fallback
+            potential_paths.extend([
                 os.path.join("terraform", "terraform.tfstate"),  # Relative to current directory
                 os.path.join(".", "terraform", "terraform.tfstate"),  # Explicit relative path
                 os.path.join(".", "terraform.tfstate"),  # In current directory
-            ]
+            ])
+            
+            logger.info(f"Looking for terraform state file in paths: {potential_paths}")
             
             for path in potential_paths:
                 if os.path.exists(path):
                     file_path = path
+                    logger.info(f"Found terraform state file at: {file_path}")
                     break
         
         # Return empty dict if we couldn't find any state file
@@ -240,7 +284,7 @@ class DetectAgent:
             return tfstate_data
         except Exception as e:
             logger.error(f"Error reading Terraform state file: {e}")
-            return {} 
+            return {}
     # Thêm phương thức detect_drift tại đây
     def detect_drift(self, resources=None):
         """Detect drift in the specified resources or all resources"""

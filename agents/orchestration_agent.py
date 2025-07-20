@@ -160,26 +160,28 @@ class OrchestrationAgent:
             if session_key and session_key not in available_sessions:
                 logger.warning(f"Session key {session_key} not found in available boto3 sessions")
                 
-                # Try to get user_id from shared memory
-                user_id = shared_memory.get("current_user_id", session_id=session_id)
+                # Try to get user_id from shared memory and create session
+                user_id = shared_memory.get("user_id", session_id=session_id)
                 if user_id:
-                    logger.info(f"Attempting to recreate boto3 session for user_id: {user_id}")
-                    
-                    # Import the function to create and register boto3 session
+                    logger.info(f"Found user_id {user_id} in shared memory, creating boto3 session")
                     try:
-                        # Import from parent directory
-                        import sys
-                        import os
-                        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                         from api import create_and_register_boto3_session
-                        
-                        # Create and register boto3 session
-                        create_and_register_boto3_session(user_id, "orchestration", session_id)
-                        logger.info(f"Recreated boto3 session for {session_key}")
-                    except ImportError as e:
-                        logger.error(f"Could not import create_and_register_boto3_session: {e}")
+                        user_session = create_and_register_boto3_session(user_id, "orchestration", session_id)
+                        if user_session:
+                            logger.info(f"Successfully created boto3 session for {session_key}")
+                    except ImportError:
+                        logger.warning("Could not import create_and_register_boto3_session from api")
+                else:
+                    logger.warning(f"No user_id found in shared memory for session {session_id}")
         except ImportError:
-            logger.warning("Could not import aws_wrapper to check available sessions")
+            logger.warning("Could not import aws_wrapper to check for boto3 sessions")
+        
+        # Get session-specific terraform directory if available
+        session_terraform_dir = None
+        if session_id:
+            session_terraform_dir = shared_memory.get("session_terraform_dir", session_id=session_id)
+            if session_terraform_dir:
+                logger.info(f"Found session-specific terraform directory: {session_terraform_dir}")
         
         # Create a new state object with updated shared memory
         if hasattr(self.agent, 'state'):
@@ -189,16 +191,25 @@ class OrchestrationAgent:
             if session_id:
                 self.agent.state.aws_session_key = session_key
                 logger.info(f"Updated agent state with aws_session_key: {session_key}")
+                
+                # Update terraform directory if available
+                if session_terraform_dir:
+                    self.agent.state.terraform_dir = session_terraform_dir
+                    logger.info(f"Updated OrchestrationAgent to use session-specific terraform directory: {session_terraform_dir}")
         else:
             self.agent.state = AgentState({
                 "shared_memory": shared_memory.data,
                 "agent_type": "orchestration",
                 "aws_region": self.region,
-                "aws_session_key": session_key
+                "aws_session_key": session_key,
+                "terraform_dir": session_terraform_dir if session_terraform_dir else None
             })
             
             if session_key:
                 logger.info(f"Created new agent state with aws_session_key: {session_key}")
+            
+            if session_terraform_dir:
+                logger.info(f"Created new agent state with terraform_dir: {session_terraform_dir}")
         
     def _set_shared_memory_wrapper(self, key, value):
         """

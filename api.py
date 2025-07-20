@@ -501,6 +501,13 @@ You can also run multiple agents in parallel if needed for better performance.
             # Check if there's a user_id associated with the current request
             user_id = shared_memory.get("current_user_id", session_id=session_id)
             
+            # Get session-specific terraform directory if available
+            session_terraform_dir = shared_memory.get("session_terraform_dir", session_id=session_id)
+            if session_terraform_dir and hasattr(agent, 'state'):
+                # Update agent's terraform directory to use session-specific directory
+                agent.state.terraform_dir = session_terraform_dir
+                logger.info(f"Updated {agent_type} agent to use session-specific terraform directory: {session_terraform_dir}")
+            
             # Store original environment variables
             original_env = {}
             
@@ -572,6 +579,11 @@ You can also run multiple agents in parallel if needed for better performance.
         # Check if there's a user_id associated with the current request
         user_id = shared_memory.get("current_user_id", session_id=session_id)
         
+        # Get session-specific terraform directory if available
+        session_terraform_dir = shared_memory.get("session_terraform_dir", session_id=session_id)
+        if session_terraform_dir:
+            logger.info(f"Using session-specific terraform directory for parallel execution: {session_terraform_dir}")
+        
         # If user_id exists, set up boto3 sessions for each agent
         if user_id:
             logger.info(f"Setting up AWS sessions for parallel execution using user_id: {user_id}")
@@ -585,6 +597,13 @@ You can also run multiple agents in parallel if needed for better performance.
                         # Store boto3 session in orchestrator's _boto3_sessions dictionary
                         session_key = f"{agent_type}_{session_id}"
                         self._boto3_sessions[session_key] = user_session
+                        
+                    # Update agent's terraform directory if available
+                    if session_terraform_dir:
+                        agent = self.agents[agent_type].get_agent()
+                        if hasattr(agent, 'state'):
+                            agent.state.terraform_dir = session_terraform_dir
+                            logger.info(f"Updated {agent_type} agent to use session-specific terraform directory for parallel execution")
             
             # Also set AWS environment variables temporarily
             # This is for tools that don't use our wrapper
@@ -1098,8 +1117,8 @@ async def upload_terraform_file(
     This endpoint:
     1. Validates that the uploaded file is a .tf file or .zip folder
     2. If zip file, extracts only .tf files from the folder structure
-    3. Clears the current terraform directory
-    4. Saves the .tf files to the terraform directory
+    3. Creates a session-specific terraform directory
+    4. Saves the .tf files to the session-specific directory
     5. Runs terraform plan to generate/update the .tfstate file
     6. Stores file information in session-specific shared memory
     
@@ -1138,15 +1157,15 @@ async def upload_terraform_file(
         if not content:
             raise HTTPException(status_code=400, detail="Empty file uploaded")
         
-        # Clear existing files in terraform directory (but preserve .terraform and .tfstate files)
-        terraform_dir = os.path.abspath(TERRAFORM_DIR)
+        # Base terraform directory
+        base_terraform_dir = os.path.abspath(TERRAFORM_DIR)
         
         # Create session-specific terraform directory
-        session_terraform_dir = os.path.join(terraform_dir, f"session_{session_id}")
+        session_terraform_dir = os.path.join(base_terraform_dir, f"session_{session_id}")
         os.makedirs(session_terraform_dir, exist_ok=True)
         
-        # Ensure main terraform directory exists
-        os.makedirs(terraform_dir, exist_ok=True)
+        # Ensure base terraform directory exists
+        os.makedirs(base_terraform_dir, exist_ok=True)
         
         # Remove existing .tf files in the session-specific directory
         for tf_file in glob.glob(os.path.join(session_terraform_dir, "*.tf")):
@@ -1213,10 +1232,6 @@ async def upload_terraform_file(
                         # Copy file to session directory
                         shutil.copy2(tf_file_path, dest_path)
                         
-                        # Also copy to main terraform directory for compatibility
-                        main_dest_path = os.path.join(terraform_dir, file_name)
-                        shutil.copy2(tf_file_path, main_dest_path)
-                        
                         # Read file content for shared memory
                         with open(tf_file_path, 'r') as f:
                             try:
@@ -1249,11 +1264,6 @@ async def upload_terraform_file(
             with open(session_file_path, 'wb') as f:
                 f.write(content)
             
-            # Also save to main terraform directory for compatibility
-            main_file_path = os.path.join(terraform_dir, file.filename)
-            with open(main_file_path, 'wb') as f:
-                f.write(content)
-            
             # Store file content in memory
             try:
                 file_contents[file.filename] = content.decode('utf-8')
@@ -1261,40 +1271,25 @@ async def upload_terraform_file(
                 file_contents[file.filename] = "Binary file - content not stored in memory"
             
             extracted_files.append(file.filename)
-            logger.info(f"Saved terraform file to session directory: {session_file_path} and main directory: {main_file_path}")
+            logger.info(f"Saved terraform file to session directory: {session_file_path}")
         
         # Run terraform plan using MCP tools with ExecuteTerraformCommand from awblab
         logger.info("Running terraform plan using ExecuteTerraformCommand from awblab MCP...")
         
         # First, try to initialize terraform if needed
-        logger.info("Initializing terraform...")
-        # init_result = terraform_run_command(
-        #     command="init",
-        #     working_directory=terraform_dir
-        # )
-        
-        # if not init_result.get("success", False):
-        #     logger.warning(f"Terraform init failed: {init_result.get('output', 'Unknown error')}")
-            # Continue anyway, as some configurations might not need init
+        logger.info(f"Initializing terraform in session directory: {session_terraform_dir}")
         
         # Use terraform_run_command with ExecuteTerraformCommand from awblab MCP
         logger.info(f"Running terraform plan using ExecuteTerraformCommand in session directory: {session_terraform_dir}")
         
-        # First try with session directory
+        # Run terraform plan in session directory
         plan_result = terraform_plan(
             terraform_dir=session_terraform_dir
         )
         
-        # If plan fails in session directory, try with main directory
-        if not plan_result.get("success", False):
-            logger.warning(f"Terraform plan failed in session directory, trying main directory: {terraform_dir}")
-            plan_result = terraform_plan(
-                terraform_dir=terraform_dir
-            )
-        
         # Run terraform apply
         apply_result = terraform_apply(
-            terraform_dir=session_terraform_dir if plan_result.get("success", False) else terraform_dir,
+            terraform_dir=session_terraform_dir,
             auto_approve=True
         )
         
@@ -1305,7 +1300,7 @@ async def upload_terraform_file(
         shared_memory.set("terraform_plan_result", plan_result, session_id)
         shared_memory.set("terraform_apply_result", apply_result, session_id)
         shared_memory.set("terraform_directory", session_terraform_dir, session_id)
-        shared_memory.set("main_terraform_directory", terraform_dir, session_id)
+        shared_memory.set("session_terraform_dir", session_terraform_dir, session_id)
         shared_memory.set("upload_timestamp", datetime.now().isoformat(), session_id)
         
         # Store file content in shared memory
