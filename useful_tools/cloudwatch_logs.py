@@ -17,6 +17,29 @@ from strands import tool
 
 logger = logging.getLogger(__name__)
 
+# Import shared_memory and boto3 session management functions
+try:
+    import sys
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from shared_memory import shared_memory
+    from useful_tools.aws_wrapper import get_boto3_session
+    logger.info("Successfully imported shared_memory and boto3 session management")
+except ImportError as e:
+    logger.error(f"Failed to import shared_memory or boto3 session management: {e}")
+    # Create a dummy shared_memory implementation if needed
+    class DummySharedMemory:
+        def get(self, key, default=None, session_id=None):
+            return default
+        def set(self, key, value, session_id=None):
+            pass
+        def get_current_session(self):
+            return None
+    shared_memory = DummySharedMemory()
+    
+    # Dummy function for get_boto3_session if import fails
+    def get_boto3_session(session_key):
+        return None
+
 @tool
 def cloudwatch_logs(
     log_group_name: str,
@@ -24,7 +47,8 @@ def cloudwatch_logs(
     end_time: Optional[str] = None,
     filter_pattern: Optional[str] = None,
     region: Optional[str] = None,
-    max_results: int = 50
+    max_results: int = 50,
+    session_key: Optional[str] = None
 ) -> Dict:
     """
     Fetch and analyze AWS CloudWatch logs for infrastructure events.
@@ -39,6 +63,7 @@ def cloudwatch_logs(
         filter_pattern: CloudWatch logs filter pattern. Default focuses on common drift indicators.
         region: AWS region to search. Defaults to AWS_REGION env variable or 'us-east-1'.
         max_results: Maximum number of results to return (default: 50).
+        session_key: Key to identify the boto3 session to use (e.g., 'detection_session_id')
     
     Returns:
         Dict containing:
@@ -69,9 +94,36 @@ def cloudwatch_logs(
         # Default filter pattern for infrastructure changes if none provided
         if not filter_pattern:
             filter_pattern = '? "CREATE_" ? "UPDATE_" ? "DELETE_" ? "MODIFY_" ? "ERROR" ? "FAIL" ? "CREATE_FAILED" ? "UPDATE_FAILED"'
+        
+        # Try to get session_key from agent state if not provided
+        if not session_key:
+            try:
+                # Get the current agent state from the calling context
+                from strands.agent.state import get_current_state
+                state = get_current_state()
+                if state and hasattr(state, 'aws_session_key'):
+                    session_key = state.aws_session_key
+                    logger.info(f"Using session key from agent state: {session_key}")
+                elif hasattr(shared_memory, 'get_current_session'):
+                    # Try to get session from shared memory
+                    session_id = shared_memory.get_current_session()
+                    if session_id:
+                        session_key = f"detection_{session_id}"
+                        logger.info(f"Using session key from shared memory: {session_key}")
+            except Exception as e:
+                logger.debug(f"Could not get session key from agent state: {e}")
             
-        # Initialize CloudWatch Logs client
-        logs_client = boto3.client('logs', region_name=region)
+        # Initialize CloudWatch Logs client with user-specific session if available
+        user_session = None
+        if session_key:
+            user_session = get_boto3_session(session_key)
+            
+        if user_session:
+            logger.info(f"Using user-specific boto3 session for CloudWatch Logs: {session_key}")
+            logs_client = user_session.client('logs', region_name=region)
+        else:
+            logger.info("Using default boto3 session for CloudWatch Logs")
+            logs_client = boto3.client('logs', region_name=region)
         
         # Query CloudWatch Logs
         response = logs_client.filter_log_events(
@@ -129,7 +181,8 @@ def cloudwatch_logs(
             'driftRelatedEvents': len(drift_indicators),
             'logGroup': log_group_name,
             'timeRange': f"{start_time_dt.isoformat()} to {end_time_dt.isoformat()}",
-            'filterPattern': filter_pattern
+            'filterPattern': filter_pattern,
+            'used_session': session_key if user_session else "default"
         }
         
         # Analyze most common drift indicators

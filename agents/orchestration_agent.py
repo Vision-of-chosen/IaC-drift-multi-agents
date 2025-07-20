@@ -103,6 +103,59 @@ def use_aws_with_session(
         session_key=session_key
     )
 
+# Define wrappers for cloudtrail_logs and cloudwatch_logs to include session_key
+@tool
+def cloudtrail_logs_with_session(
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    region: Optional[str] = None,
+    event_name: Optional[str] = None,
+    resource_type: Optional[str] = None,
+    max_results: int = 50
+):
+    """Wrapper for cloudtrail_logs that includes the session key"""
+    session_id = shared_memory.get_current_session()
+    session_key = f"orchestration_{session_id}" if session_id else None
+    # Use the region from the agent if not provided
+    if not region:
+        region = os.environ.get("AWS_REGION", BEDROCK_REGION)
+        
+    return cloudtrail_logs.cloudtrail_logs(
+        start_time=start_time,
+        end_time=end_time,
+        region=region,
+        event_name=event_name,
+        resource_type=resource_type,
+        max_results=max_results,
+        session_key=session_key
+    )
+
+@tool
+def cloudwatch_logs_with_session(
+    log_group_name: str,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    filter_pattern: Optional[str] = None,
+    region: Optional[str] = None,
+    max_results: int = 50
+):
+    """Wrapper for cloudwatch_logs that includes the session key"""
+    session_id = shared_memory.get_current_session()
+    session_key = f"orchestration_{session_id}" if session_id else None
+    # Use the region from the agent if not provided
+    if not region:
+        region = os.environ.get("AWS_REGION", BEDROCK_REGION)
+        
+    return cloudwatch_logs.cloudwatch_logs(
+        log_group_name=log_group_name,
+        start_time=start_time,
+        end_time=end_time,
+        filter_pattern=filter_pattern,
+        region=region,
+        max_results=max_results,
+        session_key=session_key
+    )
+
 class OrchestrationAgent:
     """Central coordinator for the multi-agent system"""
     
@@ -120,6 +173,8 @@ class OrchestrationAgent:
             description="Central coordinator for the Terraform Drift Detection & Remediation System",
             # callback_handler=create_agent_callback_handler("OrchestrationAgent"),
             tools = [
+                cloudtrail_logs_with_session,
+                cloudwatch_logs_with_session,
                 file_read,
                 file_write,
                 journal,

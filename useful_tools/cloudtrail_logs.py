@@ -17,6 +17,29 @@ from strands import tool
 
 logger = logging.getLogger(__name__)
 
+# Import shared_memory and boto3 session management functions
+try:
+    import sys
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from shared_memory import shared_memory
+    from useful_tools.aws_wrapper import get_boto3_session
+    logger.info("Successfully imported shared_memory and boto3 session management")
+except ImportError as e:
+    logger.error(f"Failed to import shared_memory or boto3 session management: {e}")
+    # Create a dummy shared_memory implementation if needed
+    class DummySharedMemory:
+        def get(self, key, default=None, session_id=None):
+            return default
+        def set(self, key, value, session_id=None):
+            pass
+        def get_current_session(self):
+            return None
+    shared_memory = DummySharedMemory()
+    
+    # Dummy function for get_boto3_session if import fails
+    def get_boto3_session(session_key):
+        return None
+
 @tool
 def cloudtrail_logs(
     start_time: Optional[str] = None,
@@ -24,7 +47,8 @@ def cloudtrail_logs(
     region: Optional[str] = None,
     event_name: Optional[str] = None,
     resource_type: Optional[str] = None,
-    max_results: int = 50
+    max_results: int = 50,
+    session_key: Optional[str] = None
 ) -> Dict:
     """
     Fetch and analyze AWS CloudTrail logs for infrastructure changes.
@@ -40,6 +64,7 @@ def cloudtrail_logs(
         event_name: Specific CloudTrail event name to filter (e.g., 'CreateBucket', 'RunInstances').
         resource_type: AWS resource type to filter for (e.g., 'AWS::S3::Bucket').
         max_results: Maximum number of results to return (default: 50).
+        session_key: Key to identify the boto3 session to use (e.g., 'detection_session_id')
     
     Returns:
         Dict containing:
@@ -62,9 +87,36 @@ def cloudtrail_logs(
         # Get AWS region
         if not region:
             region = os.environ.get('AWS_REGION', 'us-east-1')
+        
+        # Try to get session_key from agent state if not provided
+        if not session_key:
+            try:
+                # Get the current agent state from the calling context
+                from strands.agent.state import get_current_state
+                state = get_current_state()
+                if state and hasattr(state, 'aws_session_key'):
+                    session_key = state.aws_session_key
+                    logger.info(f"Using session key from agent state: {session_key}")
+                elif hasattr(shared_memory, 'get_current_session'):
+                    # Try to get session from shared memory
+                    session_id = shared_memory.get_current_session()
+                    if session_id:
+                        session_key = f"detection_{session_id}"
+                        logger.info(f"Using session key from shared memory: {session_key}")
+            except Exception as e:
+                logger.debug(f"Could not get session key from agent state: {e}")
             
-        # Initialize CloudTrail client
-        cloudtrail = boto3.client('cloudtrail', region_name=region)
+        # Initialize CloudTrail client with user-specific session if available
+        user_session = None
+        if session_key:
+            user_session = get_boto3_session(session_key)
+            
+        if user_session:
+            logger.info(f"Using user-specific boto3 session for CloudTrail: {session_key}")
+            cloudtrail = user_session.client('cloudtrail', region_name=region)
+        else:
+            logger.info("Using default boto3 session for CloudTrail")
+            cloudtrail = boto3.client('cloudtrail', region_name=region)
         
         # Build lookup attributes
         lookup_attributes = []
@@ -149,7 +201,8 @@ def cloudtrail_logs(
             'totalEvents': len(processed_events),
             'driftRelevantEvents': sum(1 for e in processed_events if e.get('isDriftRelevant', False)),
             'affectedResourceTypes': list(potentially_drifted_resources.keys()),
-            'timeRange': f"{start_time_dt.isoformat()} to {end_time_dt.isoformat()}"
+            'timeRange': f"{start_time_dt.isoformat()} to {end_time_dt.isoformat()}",
+            'used_session': session_key if user_session else "default"
         }
         
         return {
