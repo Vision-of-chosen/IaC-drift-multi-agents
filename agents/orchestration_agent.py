@@ -18,7 +18,7 @@ from strands import Agent, tool
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
 # Import use_aws directly from useful_tools
-from useful_tools.use_aws import use_aws
+from strands_tools import use_aws
 from strands_tools import file_read, file_write, journal, calculator
 from datetime import datetime
 # Import additional useful tools for comprehensive drift detection
@@ -195,7 +195,7 @@ class OrchestrationAgent:
             description="Central coordinator for the Terraform Drift Detection & Remediation System",
             # callback_handler=create_agent_callback_handler("OrchestrationAgent"),
             tools = [
-                aws,
+                use_aws,
                 cloudtrail_logs_with_session,
                 cloudwatch_logs_with_session,
                 file_read,

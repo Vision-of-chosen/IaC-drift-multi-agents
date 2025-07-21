@@ -17,12 +17,8 @@ from strands import Agent, tool
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
 # Try to import our wrapped use_aws first, fall back to original if not available
-try:
-    from useful_tools.aws_wrapper import use_aws
-    logger.info("Using wrapped use_aws tool from useful_tools.aws_wrapper")
-except ImportError:
-    from strands_tools import use_aws, retrieve
-    logger.warning("Using original use_aws tool from strands_tools")
+from strands_tools import use_aws
+
 from datetime import datetime
 from useful_tools.aws_documentation import aws_documentation_search
 from useful_tools.terraform_documentation import terraform_documentation_search
@@ -83,7 +79,7 @@ class DriftAnalyzerAgent:
             name="DriftAnalyzerAgent",
             description="Specialist in analyzing Terraform infrastructure drift and providing recommendations",
             tools=[
-                use_aws_with_session,
+                use_aws,
                 
                 aws_documentation_search,
                 aws_documentation_read

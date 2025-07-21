@@ -1600,6 +1600,10 @@ async def set_aws_credentials(
             "region": credentials.aws_region,
             "timestamp": datetime.now().isoformat()
         }
+
+        os.environ["AWS_ACCESS_KEY_ID"] = credentials.aws_access_key_id
+        os.environ["AWS_SECRET_ACCESS_KEY"] = credentials.aws_secret_access_key
+        os.environ["AWS_REGION"] = credentials.aws_region
         
         # Store globally for user-specific access
         user_credentials_key = f"aws_credentials_{user_id}"

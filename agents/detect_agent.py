@@ -24,7 +24,8 @@ from strands import Agent, tool
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
 # Import use_aws directly from useful_tools
-from useful_tools.use_aws import use_aws
+from strands_tools import use_aws
+# from useful_tools.use_aws import use_aws
 from datetime import datetime
 from useful_tools import cloudtrail_logs
 from useful_tools import cloudwatch_logs
@@ -231,9 +232,9 @@ class DetectAgent:
         """Create the detect agent instance"""
         # Create tools list based on availability of read_tfstate
         if read_tfstate:
-            tools = [aws, cloudtrail_logs_with_session, cloudwatch_logs_with_session, read_tfstate, terraform_plan]
+            tools = [use_aws, cloudtrail_logs, cloudwatch_logs, read_tfstate, terraform_plan]
         else:
-            tools = [aws, cloudtrail_logs_with_session, cloudwatch_logs_with_session, terraform_plan]
+            tools = [use_aws, cloudtrail_logs, cloudwatch_logs, terraform_plan]
         
         agent = Agent(
             model=self.model,
@@ -467,7 +468,7 @@ class DetectAgent:
     # Thêm phương thức detect_drift tại đây
     def detect_drift(self, resources=None):
         """Detect drift in the specified resources or all resources"""
-        result = self.agent.run(f"Detect drift in terraform infrastructure for resources: {resources if resources else 'all'}")
+        result = self.agent(f"Detect drift in terraform infrastructure for resources: {resources if resources else 'all'}")
         
         # Cập nhật trạng thái vào shared memory
         self.update_agent_status({
@@ -507,7 +508,7 @@ class DetectAgent:
         """
         
         # Run the agent with the report generation prompt
-        result = self.agent.run(prompt)
+
         
         self.update_agent_status({
             "action": "report_generated",

@@ -30,12 +30,7 @@ from strands import Agent, tool
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
 # Try to import our wrapped use_aws first, fall back to original if not available
-try:
-    from useful_tools.aws_wrapper import use_aws
-    logger.info("Using wrapped use_aws tool from useful_tools.aws_wrapper")
-except ImportError:
-    from strands_tools import use_aws
-    logger.warning("Using original use_aws tool from strands_tools")
+from strands_tools import use_aws
 import boto3
 from botocore.exceptions import ClientError
 
@@ -63,34 +58,12 @@ class NotificationAgent:
     def _create_agent(self) -> Agent:
         """Create and configure the notification agent."""
         # Create a wrapper for use_aws that automatically includes the session key
-        def use_aws_with_session(service_name: str, operation_name: str, parameters: Dict[str, Any], 
-                               region: Optional[str] = None, label: Optional[str] = None, 
-                               profile_name: Optional[str] = None):
-            """Wrapper for use_aws that includes the session key"""
-            session_id = shared_memory.get_current_session()
-            session_key = f"notification_{session_id}" if session_id else None
-            
-            # Convert operation name from hyphen format to underscore format
-            # For example: 'describe-instances' -> 'describe_instances'
-            if '-' in operation_name:
-                operation_name = operation_name.replace('-', '_')
-                
-            return use_aws(
-                service_name=service_name,
-                operation_name=operation_name,
-                parameters=parameters,
-                region=region or self.aws_region,
-                label=label,
-                profile_name=profile_name,
-                session_key=session_key
-            )
-        
         agent = Agent(
             name="NotificationAgent",
             model=self.model,
             description="Monitors AWS infrastructure changes and sends email notifications about potential drift using AWS-native services",
             tools=[
-                use_aws_with_session,
+                use_aws,
                 self._set_shared_memory_wrapper,
                 self._setup_eventbridge_rule,
                 self._setup_sns_topic,

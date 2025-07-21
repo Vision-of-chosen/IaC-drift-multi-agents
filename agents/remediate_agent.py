@@ -17,12 +17,8 @@ from strands import Agent, tool
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
 # Try to import our wrapped use_aws first, fall back to original if not available
-try:
-    from useful_tools.aws_wrapper import use_aws
-    logger.info("Using wrapped use_aws tool from useful_tools.aws_wrapper")
-except ImportError:
-    from strands_tools import use_aws, file_read, file_write, editor
-    logger.warning("Using original use_aws tool from strands_tools")
+from strands_tools import use_aws
+
 from strands_tools import  file_read, file_write, editor
 from useful_tools.terraform_tools import (
     terraform_plan,
@@ -80,7 +76,7 @@ class RemediateAgent:
         """Create the remediate agent instance"""
         # Determine available tools
         tools = [
-            use_aws_with_session,
+            use_aws,
             file_read,
             file_write,
             editor,
