@@ -76,6 +76,7 @@ import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
+from strands import Agent, tool
 
 import boto3
 from botocore.exceptions import ParamValidationError, ValidationError
@@ -509,3 +510,96 @@ def use_aws(tool: ToolUse, **kwargs: Any) -> ToolResult:
             "status": "error",
             "content": [{"text": f"AWS call threw exception: {str(ex)}"}],
         }
+
+@tool
+def aws(service, operation, parameters=None, region=None):
+    """
+    Simple helper function to execute AWS operations.
+    
+    Args:
+        service: AWS service name (e.g., 's3', 'ec2', 'dynamodb')
+        operation: Operation to perform (e.g., 'list_buckets', 'describe_instances')
+        parameters: Dictionary of parameters for the operation (default: {})
+        region: AWS region (default: from environment or 'us-west-2')
+    
+    Returns:
+        The result of the AWS operation
+    """
+    if parameters is None:
+        parameters = {}
+    
+    if region is None:
+        region = os.environ.get("AWS_REGION", BEDROCK_REGION)
+    
+    # Get current session ID from shared memory
+    session_id = shared_memory.get_current_session()
+    session_key = f"detect_{session_id}" if session_id else None
+    
+    # Get AWS credentials from shared memory
+    aws_access_key_id = None
+    aws_secret_access_key = None
+    aws_session_token = None
+    
+    if session_id:
+        # First check if user_id is stored in the session
+        user_id = shared_memory.get("user_id", session_id=session_id)
+        
+        if user_id:
+            # Get credentials from user-specific storage
+            user_credentials_key = f"aws_credentials_{user_id}"
+            user_credentials = shared_memory.get(user_credentials_key)
+            
+            if user_credentials and isinstance(user_credentials, dict):
+                aws_access_key_id = user_credentials.get("access_key")
+                aws_secret_access_key = user_credentials.get("secret_key")
+                
+                # Use region from credentials if not specified
+                if not region and "region" in user_credentials:
+                    region = user_credentials.get("region")
+                
+                logger.info(f"Retrieved AWS credentials for user {user_id}")
+        
+        # If no user-specific credentials, try direct session keys as fallback
+        if not aws_access_key_id or not aws_secret_access_key:
+            direct_access_key = shared_memory.get("aws_access_key_id", session_id=session_id)
+            direct_secret_key = shared_memory.get("aws_secret_access_key", session_id=session_id)
+            
+            if direct_access_key and direct_secret_key:
+                aws_access_key_id = direct_access_key
+                aws_secret_access_key = direct_secret_key
+                aws_session_token = shared_memory.get("aws_session_token", session_id=session_id)
+                logger.info("Retrieved AWS credentials directly from session")
+        
+        # Try to get region from session if not specified
+        if not region:
+            session_region = shared_memory.get("aws_region", session_id=session_id)
+            if session_region:
+                region = session_region
+    
+    logger.info(f"Executing AWS operation: {service}.{operation} with parameters: {parameters}")
+    
+    # Create a properly formatted input for use_aws
+    tool_input = {
+        "toolUseId": f"aws_{service}_{operation}",
+        "input": {
+            "service_name": service,
+            "operation_name": operation,
+            "parameters": parameters,
+            "region": region,
+            "label": f"Execute {service}.{operation}",
+            "session_id": session_id,
+            "session_key": session_key
+        }
+    }
+    
+    # Add AWS credentials to tool input if available
+    if aws_access_key_id and aws_secret_access_key:
+        tool_input["input"]["aws_access_key_id"] = aws_access_key_id
+        tool_input["input"]["aws_secret_access_key"] = aws_secret_access_key
+        if aws_session_token:
+            tool_input["input"]["aws_session_token"] = aws_session_token
+        logger.info(f"Using AWS credentials from shared memory for session {session_id}")
+    else:
+        logger.warning(f"No AWS credentials found in shared memory for session {session_id}")
+    
+    return use_aws(tool_input)

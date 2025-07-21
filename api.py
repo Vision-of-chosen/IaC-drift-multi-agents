@@ -78,9 +78,9 @@ app.add_middleware(
 
 class TerraformUploadResponse(BaseModel):
     message: str
-    filename: str
+    filenames: list[str] = Field(..., description="List of uploaded filenames")
     session_id: str
-    extracted_files: list[str] = Field(default_factory=list, description="List of .tf files extracted from the upload")
+    extracted_files: list[str] = Field(default_factory=list, description="List of .tf files extracted from the uploads")
     terraform_plan_result: Dict[str, Any]
     terraform_apply_result: Dict[str, Any]
     success: bool
@@ -367,7 +367,6 @@ If handling conversationally:
 2. Answer questions about the system
 3. Ask clarifying questions if needed
 
-You can also run multiple agents in parallel if needed for better performance.
 """
             
             # Execute orchestration agent
@@ -1122,37 +1121,28 @@ async def clear_all_sessions():
 
 @app.post("/upload-terraform", response_model=TerraformUploadResponse, summary="Upload Terraform File/Folder and Run Plan")
 async def upload_terraform_file(
-    file: UploadFile = File(...),
+    files: list[UploadFile] = File(...),
     session_id_header: Optional[str] = Depends(get_session_id_from_header)
 ):
     """
-    Upload a .tf file or a zip folder containing .tf files, replace existing terraform files, and run terraform plan
+    Upload multiple .tf files or a zip folder containing .tf files, replace existing terraform files, and run terraform plan
     
     This endpoint:
-    1. Validates that the uploaded file is a .tf file or .zip folder
-    2. If zip file, extracts only .tf files from the folder structure
-    3. Creates a session-specific terraform directory
-    4. Saves the .tf files to the session-specific directory
-    5. Runs terraform plan to generate/update the .tfstate file
-    6. Stores file information in session-specific shared memory
+    1. Accepts multiple file uploads (.tf files and/or .zip folders)
+    2. Validates that the uploaded files are .tf files or .zip folders
+    3. If zip files, extracts only .tf files from the folder structure
+    4. Creates a session-specific terraform directory
+    5. Saves the .tf files to the session-specific directory
+    6. Runs terraform plan to generate/update the .tfstate file
+    7. Stores file information in session-specific shared memory
     
     Returns the terraform plan results including any changes detected.
     """
     try:
-        # Validate file extension
-        if not file.filename:
+        if not files:
             raise HTTPException(
                 status_code=400, 
-                detail="No filename provided."
-            )
-        
-        is_zip = file.filename.lower().endswith('.zip')
-        is_tf = file.filename.lower().endswith('.tf')
-        
-        if not (is_zip or is_tf):
-            raise HTTPException(
-                status_code=400, 
-                detail="Invalid file type. Only .tf files or .zip folders are allowed."
+                detail="No files provided."
             )
         
         # Initialize session if needed
@@ -1164,12 +1154,7 @@ async def upload_terraform_file(
         # Set the current session in shared memory
         shared_memory.set_session(session_id)
         
-        logger.info(f"Processing upload of {'zip folder' if is_zip else 'terraform file'}: {file.filename} for session {session_id}")
-        
-        # Read file content
-        content = await file.read()
-        if not content:
-            raise HTTPException(status_code=400, detail="Empty file uploaded")
+        logger.info(f"Processing upload of {len(files)} files for session {session_id}")
         
         # Base terraform directory
         base_terraform_dir = os.path.abspath(TERRAFORM_DIR)
@@ -1200,92 +1185,123 @@ async def upload_terraform_file(
         
         extracted_files = []
         file_contents = {}  # Store file contents for shared memory
+        uploaded_filenames = []
         
-        if is_zip:
-            # Handle zip folder upload
-            try:
-                # Create a temporary directory to extract files
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    # Save zip file to temp directory
-                    temp_zip_path = os.path.join(temp_dir, file.filename)
-                    with open(temp_zip_path, 'wb') as f:
-                        f.write(content)
-                    
-                    # Extract zip file
-                    with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
-                        zip_ref.extractall(temp_dir)
-                    
-                    # Find all .tf files in the extracted directory
-                    tf_files_found = []
-                    for root, dirs, files in os.walk(temp_dir):
-                        for file_name in files:
-                            if file_name.lower().endswith('.tf'):
-                                tf_files_found.append(os.path.join(root, file_name))
-                    
-                    if not tf_files_found:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="No .tf files found in the uploaded zip folder."
-                        )
-                    
-                    # Copy .tf files to session-specific terraform directory
-                    for tf_file_path in tf_files_found:
-                        file_name = os.path.basename(tf_file_path)
-                        dest_path = os.path.join(session_terraform_dir, file_name)
+        # Process each uploaded file
+        for file in files:
+            if not file.filename:
+                logger.warning("Skipping file with no filename")
+                continue
+                
+            uploaded_filenames.append(file.filename)
+            is_zip = file.filename.lower().endswith('.zip')
+            is_tf = file.filename.lower().endswith('.tf')
+            
+            if not (is_zip or is_tf):
+                logger.warning(f"Skipping file with invalid type: {file.filename}")
+                continue
+            
+            # Read file content
+            content = await file.read()
+            if not content:
+                logger.warning(f"Skipping empty file: {file.filename}")
+                continue
+            
+            if is_zip:
+                # Handle zip folder upload
+                try:
+                    # Create a temporary directory to extract files
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        # Save zip file to temp directory
+                        temp_zip_path = os.path.join(temp_dir, file.filename)
+                        with open(temp_zip_path, 'wb') as f:
+                            f.write(content)
                         
-                        # Handle duplicate filenames by adding a number suffix
-                        counter = 1
-                        original_name = file_name
-                        while os.path.exists(dest_path):
-                            name_without_ext = os.path.splitext(original_name)[0]
-                            ext = os.path.splitext(original_name)[1]
-                            file_name = f"{name_without_ext}_{counter}{ext}"
+                        # Extract zip file
+                        with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
+                            zip_ref.extractall(temp_dir)
+                        
+                        # Find all .tf files in the extracted directory
+                        tf_files_found = []
+                        for root, dirs, files in os.walk(temp_dir):
+                            for file_name in files:
+                                if file_name.lower().endswith('.tf'):
+                                    tf_files_found.append(os.path.join(root, file_name))
+                        
+                        if not tf_files_found:
+                            logger.warning(f"No .tf files found in the uploaded zip folder: {file.filename}")
+                            continue
+                        
+                        # Copy .tf files to session-specific terraform directory
+                        for tf_file_path in tf_files_found:
+                            file_name = os.path.basename(tf_file_path)
                             dest_path = os.path.join(session_terraform_dir, file_name)
-                            counter += 1
-                        
-                        # Copy file to session directory
-                        shutil.copy2(tf_file_path, dest_path)
-                        
-                        # Read file content for shared memory
-                        with open(tf_file_path, 'r') as f:
-                            try:
-                                file_content = f.read()
-                                file_contents[file_name] = file_content
-                            except UnicodeDecodeError:
-                                # Handle binary files
-                                file_contents[file_name] = "Binary file - content not stored in memory"
-                        
-                        extracted_files.append(file_name)
-                        logger.info(f"Extracted and saved terraform file: {file_name}")
+                            
+                            # Handle duplicate filenames by adding a number suffix
+                            counter = 1
+                            original_name = file_name
+                            while os.path.exists(dest_path):
+                                name_without_ext = os.path.splitext(original_name)[0]
+                                ext = os.path.splitext(original_name)[1]
+                                file_name = f"{name_without_ext}_{counter}{ext}"
+                                dest_path = os.path.join(session_terraform_dir, file_name)
+                                counter += 1
+                            
+                            # Copy file to session directory
+                            shutil.copy2(tf_file_path, dest_path)
+                            
+                            # Read file content for shared memory
+                            with open(tf_file_path, 'r') as f:
+                                try:
+                                    file_content = f.read()
+                                    file_contents[file_name] = file_content
+                                except UnicodeDecodeError:
+                                    # Handle binary files
+                                    file_contents[file_name] = "Binary file - content not stored in memory"
+                            
+                            extracted_files.append(file_name)
+                            logger.info(f"Extracted and saved terraform file: {file_name}")
+                    
+                    logger.info(f"Successfully extracted {len(extracted_files)} .tf files from zip folder: {file.filename}")
+                    
+                except zipfile.BadZipFile:
+                    logger.warning(f"Invalid zip file format: {file.filename}")
+                except Exception as e:
+                    logger.error(f"Error processing zip file {file.filename}: {e}")
+            else:
+                # Handle single .tf file upload
+                # Save to session-specific directory
+                session_file_path = os.path.join(session_terraform_dir, file.filename)
                 
-                logger.info(f"Successfully extracted {len(extracted_files)} .tf files from zip folder")
+                # Handle duplicate filenames by adding a number suffix
+                counter = 1
+                original_name = file.filename
+                while os.path.exists(session_file_path):
+                    name_without_ext = os.path.splitext(original_name)[0]
+                    ext = os.path.splitext(original_name)[1]
+                    new_filename = f"{name_without_ext}_{counter}{ext}"
+                    session_file_path = os.path.join(session_terraform_dir, new_filename)
+                    counter += 1
                 
-            except zipfile.BadZipFile:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Invalid zip file format."
-                )
-            except Exception as e:
-                logger.error(f"Error processing zip file: {e}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to process zip file: {str(e)}"
-                )
-        else:
-            # Handle single .tf file upload
-            # Save to session-specific directory
-            session_file_path = os.path.join(session_terraform_dir, file.filename)
-            with open(session_file_path, 'wb') as f:
-                f.write(content)
-            
-            # Store file content in memory
-            try:
-                file_contents[file.filename] = content.decode('utf-8')
-            except UnicodeDecodeError:
-                file_contents[file.filename] = "Binary file - content not stored in memory"
-            
-            extracted_files.append(file.filename)
-            logger.info(f"Saved terraform file to session directory: {session_file_path}")
+                with open(session_file_path, 'wb') as f:
+                    f.write(content)
+                
+                # Store file content in memory
+                try:
+                    actual_filename = os.path.basename(session_file_path)
+                    file_contents[actual_filename] = content.decode('utf-8')
+                    extracted_files.append(actual_filename)
+                    logger.info(f"Saved terraform file to session directory: {session_file_path}")
+                except UnicodeDecodeError:
+                    file_contents[actual_filename] = "Binary file - content not stored in memory"
+                    extracted_files.append(actual_filename)
+                    logger.info(f"Saved binary terraform file to session directory: {session_file_path}")
+        
+        if not extracted_files:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid Terraform files were found in the uploaded files."
+            )
         
         # Run terraform plan using MCP tools with ExecuteTerraformCommand from awblab
         logger.info("Running terraform plan using ExecuteTerraformCommand from awblab MCP...")
@@ -1308,7 +1324,7 @@ async def upload_terraform_file(
         )
         
         # Update shared memory with the upload results (session-specific)
-        shared_memory.set("last_uploaded_file", file.filename, session_id)
+        shared_memory.set("last_uploaded_files", uploaded_filenames, session_id)
         shared_memory.set("extracted_terraform_files", extracted_files, session_id)
         shared_memory.set("terraform_file_contents", file_contents, session_id)
         shared_memory.set("terraform_plan_result", plan_result, session_id)
@@ -1323,16 +1339,9 @@ async def upload_terraform_file(
         
         success = plan_result.get("success", False)
         
-        if success:
-            if is_zip:
-                message = f"Successfully uploaded zip folder '{file.filename}' with {len(extracted_files)} .tf files and ran terraform plan"
-            else:
-                message = f"Successfully uploaded {file.filename} and ran terraform plan"
-        else:
-            if is_zip:
-                message = f"Uploaded zip folder '{file.filename}' with {len(extracted_files)} .tf files but terraform plan encountered issues"
-            else:
-                message = f"Uploaded {file.filename} but terraform plan encountered issues"
+        message = f"Successfully uploaded {len(uploaded_filenames)} files with {len(extracted_files)} .tf files extracted"
+        if not success:
+            message += " but terraform plan encountered issues"
                 
         # Add session ID to session_states if not already there
         if session_id not in session_states:
@@ -1349,7 +1358,7 @@ async def upload_terraform_file(
         
         return TerraformUploadResponse(
             message=message,
-            filename=file.filename,
+            filenames=uploaded_filenames,
             session_id=session_id,
             extracted_files=extracted_files,
             terraform_plan_result=plan_result,
@@ -1361,10 +1370,10 @@ async def upload_terraform_file(
         # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        logger.error(f"Error uploading terraform file: {e}")
+        logger.error(f"Error uploading terraform files: {e}")
         raise HTTPException(
             status_code=500, 
-            detail=f"Failed to upload and process terraform file: {str(e)}"
+            detail=f"Failed to upload and process terraform files: {str(e)}"
         )
 
 
@@ -1578,8 +1587,8 @@ async def set_aws_credentials(
         session_id = session_id_header or session_id
         
         # Generate a user ID if not provided
-        user_id = credentials.user_id 
-        logger.info(f"AWS credentials : {user_id}")
+        user_id = credentials.user_id or str(uuid.uuid4())
+        
         # Set session in shared memory if provided
         if session_id:
             shared_memory.set_session(session_id)
