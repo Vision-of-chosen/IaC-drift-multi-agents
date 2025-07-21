@@ -311,16 +311,32 @@ class ChatOrchestrator:
                 # Store current_user_id in session-specific memory
                 shared_memory.set("current_user_id", user_id, session_id)
                 
-                # Create and register boto3 session
-                user_session = create_and_register_boto3_session(user_id, "orchestration", session_id)
+                # Check if we already have a valid boto3 session for this session_id
+                session_key = f"orchestration_{session_id}"
                 
-                if user_session:
-                    # Store boto3 session in orchestrator's _boto3_sessions dictionary
-                    session_key = f"orchestration_{session_id}"
-                    self._boto3_sessions[session_key] = user_session
+                # Check if the session exists in the aws_wrapper module
+                existing_session = None
+                try:
+                    from useful_tools.aws_wrapper import get_boto3_session
+                    existing_session = get_boto3_session(session_key)
+                    if existing_session:
+                        logger.info(f"Found existing boto3 session for {session_key}, reusing it")
+                        # Store in orchestrator's _boto3_sessions dictionary
+                        self._boto3_sessions[session_key] = existing_session
+                except ImportError:
+                    logger.warning("Could not import aws_wrapper to check for existing sessions")
+                
+                # If no existing session, create a new one
+                if not existing_session:
+                    # Create and register boto3 session
+                    user_session = create_and_register_boto3_session(user_id, "orchestration", session_id)
                     
-                    # Log the available boto3 sessions
-                    logger.info(f"Available boto3 sessions in orchestrator: {list(self._boto3_sessions.keys())}")
+                    if user_session:
+                        # Store boto3 session in orchestrator's _boto3_sessions dictionary
+                        self._boto3_sessions[session_key] = user_session
+                
+                # Log the available boto3 sessions
+                logger.info(f"Available boto3 sessions in orchestrator: {list(self._boto3_sessions.keys())}")
             
             # Let the orchestration agent decide what to do
             logger.info("Getting orchestration agent")
@@ -439,16 +455,8 @@ You can also run multiple agents in parallel if needed for better performance.
             # Update session state in shared memory
             shared_memory.set("state", session_state["conversation_state"], session_id)
             
-            # Clean up boto3 session if we created one
-            session_key = f"orchestration_{session_id}"
-            if session_key in self._boto3_sessions:
-                try:
-                    from useful_tools.aws_wrapper import clear_boto3_session
-                    clear_boto3_session(session_key)
-                    logger.info(f"Cleared boto3 session from aws_wrapper for {session_key}")
-                except ImportError:
-                    pass
-                del self._boto3_sessions[session_key]
+            # DO NOT clean up boto3 session to maintain it for consecutive chats
+            # Instead, keep the session for future use
             
             logger.info("Returning result from process_chat_message")
             return {
@@ -515,18 +523,34 @@ You can also run multiple agents in parallel if needed for better performance.
             if user_id:
                 logger.info(f"Setting up AWS session for {agent_type} agent using user_id: {user_id}")
                 
-                # Create and register boto3 session
-                user_session = create_and_register_boto3_session(user_id, agent_type, session_id)
+                # Check if we already have a valid boto3 session for this session_id
+                session_key = f"{agent_type}_{session_id}"
                 
-                if user_session:
-                    # Store boto3 session in a global dictionary keyed by agent_type and session_id
-                    # This makes it available for the agent to use
-                    session_key = f"{agent_type}_{session_id}"
-                    self._boto3_sessions[session_key] = user_session
+                # Check if the session exists in the aws_wrapper module
+                existing_session = None
+                try:
+                    from useful_tools.aws_wrapper import get_boto3_session
+                    existing_session = get_boto3_session(session_key)
+                    if existing_session:
+                        logger.info(f"Found existing boto3 session for {session_key}, reusing it")
+                        # Store in orchestrator's _boto3_sessions dictionary
+                        self._boto3_sessions[session_key] = existing_session
+                except ImportError:
+                    logger.warning("Could not import aws_wrapper to check for existing sessions")
+                
+                # If no existing session, create a new one
+                if not existing_session:
+                    # Create and register boto3 session
+                    user_session = create_and_register_boto3_session(user_id, agent_type, session_id)
                     
-                    # Also set AWS environment variables temporarily
-                    # This is for tools that don't use our wrapper
-                    original_env = set_aws_env_for_user(user_id)
+                    if user_session:
+                        # Store boto3 session in a global dictionary keyed by agent_type and session_id
+                        # This makes it available for the agent to use
+                        self._boto3_sessions[session_key] = user_session
+                
+                # Also set AWS environment variables temporarily
+                # This is for tools that don't use our wrapper
+                original_env = set_aws_env_for_user(user_id)
             
             # Execute the agent
             result = agent(user_message)
@@ -534,18 +558,8 @@ You can also run multiple agents in parallel if needed for better performance.
             # Store result in shared memory
             shared_memory.set(f"{agent_type}_last_result", str(result), session_id)
             
-            # Clean up the boto3 session reference after execution
-            session_key = f"{agent_type}_{session_id}"
-            if session_key in self._boto3_sessions:
-                del self._boto3_sessions[session_key]
-                
-                # Also clean up in the wrapper if available
-                try:
-                    from useful_tools.aws_wrapper import clear_boto3_session
-                    clear_boto3_session(session_key)
-                    logger.info(f"Cleared boto3 session from aws_wrapper for {session_key}")
-                except ImportError:
-                    pass
+            # DO NOT clean up the boto3 session to maintain it for consecutive requests
+            # We want to keep the session available for future use
             
             # Restore original environment variables
             if original_env:
@@ -1564,8 +1578,8 @@ async def set_aws_credentials(
         session_id = session_id_header or session_id
         
         # Generate a user ID if not provided
-        user_id = credentials.user_id or str(uuid.uuid4())
-        
+        user_id = credentials.user_id 
+        logger.info(f"AWS credentials : {user_id}")
         # Set session in shared memory if provided
         if session_id:
             shared_memory.set_session(session_id)
@@ -2025,12 +2039,6 @@ async def run_notification_check(custom_message: Optional[str] = None):
             status_code=500,
             detail=f"Failed to send test notification: {str(e)}"
         )
-
-class AWSCredentials(BaseModel):
-    aws_access_key_id: str = Field(..., description="AWS Access Key ID")
-    aws_secret_access_key: str = Field(..., description="AWS Secret Access Key")
-    aws_region: str = Field("ap-southeast-2", description="AWS Region")
-    user_id: Optional[str] = Field(None, description="User ID for credential association")
 
 @app.post("/aws-credentials", summary="Get AWS Credentials Export Commands")
 async def get_aws_credentials(
