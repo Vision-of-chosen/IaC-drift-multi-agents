@@ -140,20 +140,34 @@ class ReportAgent:
         # Determine risk level
         risk_level = self._calculate_risk_level(summary.get("critical_issues", 0), drift_count)
         
-        # Create report structure
+        # Get current time for creation timestamp
+        current_time = datetime.now().isoformat() + "Z"
+        start_time = datetime.now()
+        
+        # Get user info from shared memory, default to system
+        user_id = shared_memory.get("current_user_id", "system")
+        
+        # Create report structure directly at root level (not in scanDetails)
         report = {
-            "scanDetails": {
-                "id": scan_id,
-                "fileName": shared_memory.get("terraform_filename", "terraform-plan"),
-                "scanDate": datetime.now().isoformat() + "Z",
-                "status": "completed",
-                "totalResources": total_resources,
-                "driftCount": drift_count,
-                "riskLevel": risk_level
-            },
+            "id": scan_id,
+            "fileName": shared_memory.get("terraform_filename", "terraform-plan"),
+            "scanDate": current_time,
+            "status": "completed",
+            "totalResources": total_resources,
+            "driftCount": drift_count,
+            "riskLevel": risk_level,
+            "duration": "0.0s",  # Will be updated at the end
+            "createdBy": user_id,
+            "createdOn": current_time,
+            "modifiedBy": user_id,
             "drifts": self._format_drift_items(detection_results.get("drift_detection_results", []),
                                              analysis_results)
         }
+        
+        # Calculate actual duration
+        end_time = datetime.now()
+        duration_seconds = (end_time - start_time).total_seconds()
+        report["duration"] = f"{duration_seconds:.6f}s"
         
         return report
     
@@ -196,16 +210,20 @@ class ReportAgent:
             # Create drift entry with unique ID
             drift_id = f"drift-{uuid.uuid4().hex[:6]}"
             
+            # Convert state to JSON strings
+            before_state = self._extract_config_state(item.get("expected_config", {}))
+            after_state = self._extract_config_state(item.get("actual_config", {}))
+            
             drift_entry = {
-                "id": drift_id,
+                "driftCode": drift_id,
                 "resourceType": resource_type,
                 "resourceName": resource_name,
                 "riskLevel": analysis.get("severity", item.get("severity", "medium")).lower(),
-                "beforeState": self._extract_config_state(item.get("expected_config", {})),
-                "afterState": self._extract_config_state(item.get("actual_config", {})),
+                "beforeStateJson": json.dumps(before_state),
+                "afterStateJson": json.dumps(after_state),
                 "aiExplanation": analysis.get("impact_assessment", 
                                            f"Detected changes in {resource_type} configuration."),
-                "aiRemediate": self._format_remediation(
+                "aiAction": self._format_remediation(
                     analysis.get("remediation_steps", []),
                     item.get("recommended_action", "")
                 )
@@ -282,21 +300,24 @@ class ReportAgent:
         # Get current timestamp for report
         current_time = datetime.now().isoformat() + "Z"
             
-        # Get information form shared memory 
+        # Get information from shared memory 
         user_request = shared_memory.get("user_request", "")
         workflow_status = shared_memory.get("workflow_status", "completed")
+        user_id = shared_memory.get("current_user_id", "system")
 
         # Create report structure
         report = {
-            "scanDetails": {
-                "id": scan_id,
-                "fileName": shared_memory.get("terraform_filename", "terraform-plan"),
-                "scanDate": current_time,
-                "status": workflow_status,
-                "totalResources": 0,
-                "driftCount": 0,
-                "riskLevel": "none"
-            },
+            "id": scan_id,
+            "fileName": shared_memory.get("terraform_filename", "terraform-plan"),
+            "scanDate": current_time,
+            "status": workflow_status,
+            "totalResources": 0,
+            "driftCount": 0,
+            "riskLevel": "none",
+            "duration": "0.0s",
+            "createdBy": user_id,
+            "createdOn": current_time,
+            "modifiedBy": user_id,
             "drifts": [],
             "systemInfo": {
                 "lastRequest": user_request,

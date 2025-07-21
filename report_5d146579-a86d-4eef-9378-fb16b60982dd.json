@@ -1,0 +1,19 @@
+{
+  "id": "scan-243099",
+  "fileName": "terraform-plan",
+  "scanDate": "2025-07-22T00:35:19.294108Z",
+  "status": "completed",
+  "totalResources": 0,
+  "driftCount": 0,
+  "riskLevel": "none",
+  "duration": "0.0s",
+  "createdBy": "system",
+  "createdOn": "2025-07-22T00:35:19.294108Z",
+  "modifiedBy": "system",
+  "drifts": [],
+  "systemInfo": {
+    "lastRequest": "",
+    "reportGeneratedAt": "2025-07-22T00:35:19.294108Z",
+    "message": "No drift detection results available. Run drift detection first to get detailed results."
+  }
+}
