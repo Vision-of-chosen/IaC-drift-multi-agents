@@ -1,212 +1,306 @@
 # Terraform Drift Detection & Remediation System
 
-An advanced multi-agent system powered by AWS Bedrock Claude that automatica## 🔒 Security Features
+A comprehensive multi-agent system that automatically detects, analyzes, and remediates Terraform infrastructure drift using AWS Bedrock-powered Claude 3.5 Sonnet agents, accessed through both a REST API and terminal-based chat interface.
 
-1. **AWS Security**
-   - IAM role integration
-   - Secure credential handling
-   - Resource tagging
+## 🚀 System Overview
 
-2. **API Security**
-   - Request validation
-   - Rate limiting
-   - Session management
+This system uses specialized AI agents to detect, analyze, and fix discrepancies between your Terraform configurations and actual cloud infrastructure. It provides both real-time detection and notification capabilities, supporting multi-user environments with isolated credentials and sessions.
 
-## � Monitoring & Loggingzes, and remediates infrastructure drift in AWS environments. The system provides a FastAPI-based web interface for step-by-step infrastructure management.
+[![Terraform Drift System](https://img.shields.io/badge/Terraform-Drift%20Detection-blue)](https://github.com/yourusername/terraform-drift-system)
+[![API Status](https://img.shields.io/badge/API-Online-brightgreen)](https://destroydrift.raiijino.buzz)
 
-## 🌟 Key Featuresraform Drift Detection & Remediation System
+## 🏗️ Architecture Overview
 
-An advanced multi-agent system powered by AWS Bedrock Claude that automatically detects, analyzes, and remediates infrastructure drift in AWS environments. The system provides a FastAPI-based web interface for step-by-step infrastructure management.
+The system implements a multi-agent architecture with shared memory for agent communication:
 
-## � Key Features
+![System Architecture](docs/architecture.png)
 
-- **Smart Multi-Agent Architecture**
-  - Orchestration Agent coordinates the workflow
-  - Detection Agent identifies infrastructure drift
-  - Analyzer Agent assesses impact and severity
-  - Remediation Agent implements fixes
-  - Report Agent generates detailed documentation
+> **Note**: The architecture diagram can be generated from the mermaid code in `docs/architecture_diagram.md`
 
-- **API-First Design**
-  - RESTful endpoints for each workflow step
-  - Session management for workflow state
-  - Real-time progress updates
-  - Background task processing
+### Agent Ecosystem
 
-- **AWS Integration**
-  - AWS Bedrock Claude for intelligent analysis
-  - Terraform state management
-  - AWS infrastructure querying
-  - Secure remediation execution
+1. **OrchestrationAgent** (Central Coordinator)
+   - Routes user requests to specialized agents
+   - Coordinates the overall workflow
+   - Manages system state and multi-agent interactions
+   - Acts as the primary interface between user and specialized agents
 
-## 🚀 Quick Start
+2. **DetectAgent** (Drift Detection Specialist)
+   - Parses Terraform state files
+   - Queries actual AWS infrastructure
+   - Identifies discrepancies between expected and actual state
+   - Generates comprehensive drift detection reports
 
-1. **Prerequisites**
+3. **DriftAnalyzerAgent** (Analysis & Assessment)
+   - Analyzes severity and impact of detected drift
+   - Categorizes drift types (security, performance, compliance)
+   - Provides risk assessments
+   - Recommends remediation strategies
+
+4. **RemediateAgent** (Automated Remediation)
+   - Generates corrected Terraform configurations
+   - Creates/updates .tf files with proper configurations
+   - Executes Terraform plans and applies changes
+   - Validates successful remediation
+
+5. **ReportAgent** (Reporting Specialist)
+   - Generates structured JSON reports of drift findings
+   - Formats analysis for human readability
+   - Provides standardized output for integration with other systems
+   - Creates session-specific reports with detailed drift information
+
+6. **NotificationAgent** (Alerting & Monitoring)
+   - Sets up AWS EventBridge and SNS notifications
+   - Monitors real-time infrastructure changes
+   - Sends email alerts on detected drift
+   - Creates notification rules for proactive drift detection
+
+## ⚙️ Key Features
+
+- **Multi-Agent Architecture**: Specialized agents for different aspects of drift management
+- **API-First Design**: Complete REST API for integration with other systems
+- **Session Isolation**: Supports multiple users with isolated sessions and credentials
+- **Real-time Notifications**: Email alerts for infrastructure changes
+- **Comprehensive Reporting**: Detailed drift reports in standardized JSON format
+- **Interactive Chat**: Terminal and API-based chat interfaces for natural language interaction
+- **AWS Integration**: Deep integration with AWS services for accurate detection
+- **Security-First**: Proper credential management and session isolation
+
+## 🔌 API Endpoints
+
+The system provides a comprehensive API for integration:
+
+### Core Endpoints
+
+- `POST /chat` - Chat with the system (main interaction point)
+- `POST /parallel-agents` - Execute multiple agents in parallel
+- `POST /start-session` - Start a new isolated session
+- `GET /status` - Get current session status
+- `GET /shared-memory` - View shared memory contents
+- `GET /system-status` - Check overall system health
+
+### Report & Analysis Endpoints
+
+- `GET /report` - Get existing or generate new drift report
+- `POST /generate-report` - Generate fresh drift report
+- `GET /conversation` - Retrieve conversation history
+- `GET /journal` - Get daily activity journal
+
+### AWS Integration Endpoints
+
+- `POST /set-aws-credentials` - Set AWS credentials for a session
+- `GET /aws-credentials-status` - Check AWS credential status
+- `POST /upload-terraform` - Upload and process Terraform files
+- `GET /terraform-status` - Check Terraform file status
+- `GET /aws-resources/{user_id}` - List AWS resources for a user
+
+### Notification Endpoints
+
+- `POST /setup-notifications` - Configure drift notification system
+- `GET /notification-status` - Check notification system status
+- `POST /run-notification-check` - Send test notification
+
+## 🔧 Session Management
+
+The system supports multi-user operation through session management:
+
+- **Session IDs**: Each interaction gets a unique session ID
+- **X-Session-ID Header**: For maintaining continuity across API calls
+- **Isolated Memory**: Each session has private memory space
+- **User-Specific AWS Credentials**: Credentials are tied to user and session
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+1. **AWS Credentials**:
    ```bash
-   # Install dependencies
-   pip install -r requirements.txt
-
-   # Configure AWS credentials
    export AWS_ACCESS_KEY_ID=your_key
    export AWS_SECRET_ACCESS_KEY=your_secret
-   export AWS_REGION=your_region
+   export AWS_REGION=ap-southeast-2
    ```
 
-2. **Start the API Server**
+2. **Python Requirements**:
    ```bash
-   # Run the FastAPI server
-   uvicorn api:app --reload
+   pip install -r requirements.txt
    ```
 
-3. **Access the API**
-   - API documentation: http://localhost:8000/docs
-   - Swagger UI: http://localhost:8000/redoc
+3. **Terraform CLI**:
+   ```bash
+   # macOS
+   brew install terraform
+   
+   # Ubuntu/Debian
+   sudo apt-get install terraform
+   ```
 
-## � API Endpoints
+### Quick Start
 
-The system exposes the following RESTful endpoints:
+1. **Launch the API server**:
+   ```bash
+   python api.py
+   ```
 
-### Detection Endpoints
-- `POST /detect` - Start drift detection process
-  ```json
-  {
-    "terraform_dir": "string",
-    "resource_types": ["string"]
-  }
-  ```
+2. **For terminal interface**:
+   ```bash
+   python chat_interface.py
+   ```
 
-### Analysis Endpoints
-- `GET /status` - Check current system status
-- `POST /analyze` - Analyze detected drift
-  ```json
-  {
-    "severity_level": "string",
-    "resource_ids": ["string"]
-  }
-  ```
+3. **Access the API documentation**:
+   ```
+   http://localhost:8000/docs
+   ```
 
-### Remediation Endpoints
-- `POST /remediate` - Execute drift remediation
-  ```json
-  {
-    "resource_ids": ["string"],
-    "auto_approve": boolean
-  }
-  ```
+4. **Set up your Terraform directory**:
+   - Place your Terraform files in `./terraform/`
+   - Or upload via the API
 
-### Reporting Endpoints
-- `GET /report` - Generate detailed reports
-- `GET /report/{report_id}` - Get specific report
+## 🤖 Example Usage
 
-## 🏗️ Project Structure
+### Using the Chat Interface
 
-```
-IaC-drift-multi-agents/
-├── api.py                    # FastAPI application
-├── config.py                # Configuration settings
-├── shared_memory.py         # Shared state management
-├── agents/                  # AI agents
-│   ├── orchestration_agent.py
-│   ├── detect_agent.py
-│   ├── drift_analyzer_agent.py
-│   ├── remediate_agent.py
-│   └── report_agent.py
-├── useful_tools/           # Utility functions
-│   ├── terraform_tools.py
-│   ├── aws_documentation.py
-│   └── terraform_mcp_tool.py
-└── terraform/              # Infrastructure
-    ├── main.tf
-    └── variables.tf
-```
-
-## ⚙️ Configuration
-
-### Environment Variables
 ```bash
-# AWS Configuration
-AWS_ACCESS_KEY_ID=your_key
-AWS_SECRET_ACCESS_KEY=your_secret
-AWS_REGION=your_region
-
-# Bedrock Configuration
-BEDROCK_MODEL_ID=anthropic.claude-v2
-BEDROCK_REGION=us-east-1
-
-# API Configuration
-API_HOST=0.0.0.0
-API_PORT=8000
+🔧 Terraform Drift System > detect drift in s3 buckets
+🤖 OrchestrationAgent: Routing to DetectAgent to scan S3 resources...
+🤖 DetectAgent: Scanning S3 buckets for drift...
+✅ Detected 2 drifted S3 buckets. Use 'analyze' for details.
 ```
 
-## 🔒 Security Features
+### Using the API
 
-1. **Permission Management**
-   - Role-based access control
-   - Resource-level permissions
-   - Audit logging
+```bash
+# Start a session
+curl -X POST "http://localhost:8000/start-session" -H "Content-Type: application/json"
+# Response: {"session_id": "49958daf-843f-4574-8724-ff064f32d664", ...}
 
-2. **AWS Security**
-   - IAM role integration
-   - Secure credential handling
-   - Resource tagging
+# Set credentials
+curl -X POST "http://localhost:8000/set-aws-credentials" \
+  -H "Content-Type: application/json" \
+  -H "X-Session-ID: 49958daf-843f-4574-8724-ff064f32d664" \
+  -d '{"aws_access_key_id": "YOUR_KEY", "aws_secret_access_key": "YOUR_SECRET", "aws_region": "ap-southeast-2"}'
 
-3. **API Security**
-   - Request validation
-   - Rate limiting
-   - Session management
+# Chat with system
+curl -X POST "http://localhost:8000/chat" \
+  -H "Content-Type: application/json" \
+  -H "X-Session-ID: 49958daf-843f-4574-8724-ff064f32d664" \
+  -d '{"message": "detect drift in my s3 buckets"}'
 
-## � Monitoring & Logging
+# Get drift report
+curl -X GET "http://localhost:8000/report" \
+  -H "X-Session-ID: 49958daf-843f-4574-8724-ff064f32d664"
+```
 
-### System Monitoring
-- API endpoint metrics
-- Agent performance tracking
-- Resource usage statistics
+## 📊 Report Format
 
-### Logging
-- Request/response logging
-- Error tracking
-- Audit trail
+The system generates standardized JSON reports with the following structure:
 
-### Status Tracking
-- Background task status
-- Agent operation progress
-- Drift detection results
+```json
+[
+  {
+    "id": "scan-4ec010",
+    "fileName": "terraform-plan",
+    "scanDate": "2025-07-22T00:24:00.487670Z",
+    "status": "completed",
+    "totalResources": 4,
+    "driftCount": 2,
+    "riskLevel": "medium",
+    "duration": "00:01:35",
+    "createdBy": "user123",
+    "createdOn": "2025-07-22T00:24:00.496013",
+    "modifiedBy": "system",
+    "drifts": [
+      {
+        "driftCode": "drift-a8f920",
+        "resourceType": "aws_s3_bucket",
+        "resourceName": "my-bucket",
+        "riskLevel": "high",
+        "beforeStateJson": "{\"encryption\":true}",
+        "afterStateJson": "{\"encryption\":false}",
+        "aiExplanation": "S3 bucket encryption was disabled",
+        "aiAction": "1. Update Terraform to enable encryption\n2. Run terraform apply"
+      }
+    ]
+  }
+]
+```
 
-## � Contributing
+## 🛠️ Advanced Features
 
-1. Fork the repository
-2. Create a feature branch
-3. Submit a pull request with:
-   - Detailed description
-   - Test cases
-   - Documentation updates
+### Email Notifications
 
-## 📚 Documentation
+Set up real-time infrastructure change notifications:
 
-- [Architecture Details](README_ARCHITECTURE.md)
-- [System Overview](drift_system_README.md)
-- API Documentation (available at /docs endpoint)
+```bash
+curl -X POST "http://localhost:8000/setup-notifications" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "recipient_emails": ["your-email@example.com"],
+    "resource_types": ["AWS::S3::Bucket", "AWS::EC2::Instance"],
+    "setup_aws_config": true
+  }'
+```
 
-## 🆘 Support
+### Multi-User Support
 
-For issues and feature requests:
-1. Check existing GitHub issues
-2. Review the documentation
-3. Create a new issue with detailed information
+The system supports multiple users with isolated sessions:
+
+```bash
+# User 1
+curl -X POST "http://localhost:8000/chat" \
+  -H "Content-Type: application/json" \
+  -H "X-Session-ID: session1" \
+  -H "X-User-ID: user1" \
+  -d '{"message": "detect drift"}'
+
+# User 2
+curl -X POST "http://localhost:8000/chat" \
+  -H "Content-Type: application/json" \
+  -H "X-Session-ID: session2" \
+  -H "X-User-ID: user2" \
+  -d '{"message": "detect drift"}'
+```
+
+## 🔒 Security Considerations
+
+- AWS credentials are stored in isolated memory spaces per session
+- No permanent storage of credentials
+- Each user gets isolated AWS sessions
+- Supports temporary credentials via session tokens
+- Permission-based access control for sensitive operations
+
+## 🐛 Troubleshooting
+
+### Common Issues
+
+1. **AWS Credential Issues**:
+   ```bash
+   curl -X GET "http://localhost:8000/test-aws-connection?user_id=your_user_id"
+   ```
+
+2. **Session Management**:
+   ```bash
+   curl -X GET "http://localhost:8000/current-session-info"
+   ```
+
+3. **API Debugging**:
+   ```bash
+   curl -X GET "http://localhost:8000/debug-boto3-sessions?session_id=your_session_id"
+   ```
+
+## 📚 Additional Resources
+
+- **API Documentation**: Access Swagger UI at `/docs` endpoint
+- **Architecture Document**: See `README_ARCHITECTURE.md` for detailed design
+- **Sample Reports**: Explore example report files in the repository
 
 ## 🤝 Contributing
 
-This system is built on the strand-agents framework. For contributions:
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-1. Fork the repository
-2. Create feature branches
-3. Test thoroughly with non-production infrastructure
-4. Submit pull requests with detailed descriptions
+## 📄 License
 
-## 📜 License
-
-This project follows the same license as the strand-agents framework.
+This project is licensed under the MIT License - see the LICENSE file for details.
 
 ---
 
-**⚠️ Important Note**: Always test in non-production environments before applying changes to production infrastructure. This system makes actual changes to AWS resources and Terraform configurations. 
+**⚠️ Important**: This system makes actual changes to AWS resources and Terraform configurations. Always test in non-production environments first. 
