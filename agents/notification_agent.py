@@ -159,44 +159,76 @@ class NotificationAgent:
             # Create SNS client
             sns_client = boto3.client('sns', region_name=self.aws_region)
             
-            # Create SNS topic
-            response = sns_client.create_topic(Name=topic_name)
-            topic_arn = response['TopicArn']
+            # Check if topic already exists in shared memory
+            existing_topic_arn = shared_memory.get("notification_sns_topic_arn")
+            
+            # Create SNS topic or use existing
+            if existing_topic_arn:
+                topic_arn = existing_topic_arn
+                logger.info(f"Using existing SNS topic: {topic_arn}")
+            else:
+                # Create new topic
+                response = sns_client.create_topic(Name=topic_name)
+                topic_arn = response['TopicArn']
+                logger.info(f"Created new SNS topic: {topic_arn}")
+                
+                # Add topic tags
+                sns_client.tag_resource(
+                    ResourceArn=topic_arn,
+                    Tags=[
+                        {
+                            'Key': 'Purpose',
+                            'Value': 'DriftDetection'
+                        },
+                        {
+                            'Key': 'CreatedBy',
+                            'Value': 'NotificationAgent'
+                        }
+                    ]
+                )
             
             # Store topic ARN
             self.sns_topic_arn = topic_arn
             shared_memory.set("notification_sns_topic_arn", topic_arn)
             
-            # Subscribe email to topic
-            subscription_response = sns_client.subscribe(
-                TopicArn=topic_arn,
-                Protocol='email',
-                Endpoint=self.recipient_email
-            )
+            # Check if email is already subscribed
+            subscribed = False
+            try:
+                # List subscriptions for this topic
+                subscriptions = sns_client.list_subscriptions_by_topic(TopicArn=topic_arn)
+                
+                # Check if email is already in subscriptions
+                for sub in subscriptions.get('Subscriptions', []):
+                    if sub.get('Protocol') == 'email' and sub.get('Endpoint') == self.recipient_email:
+                        subscription_arn = sub.get('SubscriptionArn')
+                        subscribed = True
+                        logger.info(f"Email {self.recipient_email} is already subscribed: {subscription_arn}")
+                        break
+            except Exception as e:
+                logger.warning(f"Error checking existing subscriptions: {str(e)}")
             
-            # Add topic tags
-            sns_client.tag_resource(
-                ResourceArn=topic_arn,
-                Tags=[
-                    {
-                        'Key': 'Purpose',
-                        'Value': 'DriftDetection'
-                    },
-                    {
-                        'Key': 'CreatedBy',
-                        'Value': 'NotificationAgent'
-                    }
-                ]
-            )
+            # Subscribe email to topic if not already subscribed
+            if not subscribed:
+                subscription_response = sns_client.subscribe(
+                    TopicArn=topic_arn,
+                    Protocol='email',
+                    Endpoint=self.recipient_email
+                )
+                subscription_arn = subscription_response.get('SubscriptionArn', 'pending confirmation')
+                logger.info(f"Email subscription created: {subscription_arn}")
+            else:
+                subscription_arn = "existing"
             
-            logger.info(f"SNS topic created: {topic_arn}")
-            logger.info(f"Email subscription created: {subscription_response['SubscriptionArn']}")
+            # Store subscription ARN
+            shared_memory.set("notification_sns_subscription_arn", subscription_arn)
             
             return {
                 "status": "success",
-                "message": f"SNS topic created and email {self.recipient_email} subscribed",
+                "message": f"SNS topic {'configured' if existing_topic_arn else 'created'} and email {self.recipient_email} {'already subscribed' if subscribed else 'subscribed'}",
                 "topic_arn": topic_arn,
-                "subscription_arn": subscription_response.get('SubscriptionArn', 'pending confirmation')
+                "subscription_arn": subscription_arn,
+                "new_topic": not existing_topic_arn,
+                "new_subscription": not subscribed
             }
             
         except ClientError as e:
@@ -209,14 +241,28 @@ class NotificationAgent:
     
     def _create_lambda_function(self) -> Dict[str, Any]:
         """
-        Create a Lambda function to process EventBridge events and send notifications.
+        Create or update a Lambda function to process EventBridge events and send notifications.
         
         Returns:
             Dict with status and function ARN
         """
         try:
+            # Function name
+            function_name = 'DriftDetectionFunction'
+            
             # Create Lambda client
             lambda_client = boto3.client('lambda', region_name=self.aws_region)
+            
+            # Check if Lambda function already exists
+            lambda_exists = False
+            try:
+                lambda_response = lambda_client.get_function(FunctionName=function_name)
+                lambda_exists = True
+                function_arn = lambda_response['Configuration']['FunctionArn']
+                logger.info(f"Lambda function already exists: {function_arn}")
+            except ClientError:
+                lambda_exists = False
+                logger.info(f"Lambda function '{function_name}' does not exist, will create it")
             
             # Create IAM role for Lambda
             iam_client = boto3.client('iam', region_name=self.aws_region)
@@ -229,8 +275,10 @@ class NotificationAgent:
                 role_response = iam_client.get_role(RoleName=role_name)
                 role_arn = role_response['Role']['Arn']
                 logger.info(f"Using existing IAM role: {role_arn}")
+                role_exists = True
             except ClientError:
                 # Create the role if it doesn't exist
+                role_exists = False
                 logger.info(f"Creating new IAM role: {role_name}")
                 
                 # Create trust relationship policy document
@@ -262,32 +310,59 @@ class NotificationAgent:
                     PolicyArn='arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
                 )
                 
-                # Create and attach SNS publish policy
-                sns_policy = {
-                    "Version": "2012-10-17",
-                    "Statement": [
-                        {
-                            "Effect": "Allow",
-                            "Action": "sns:Publish",
-                            "Resource": self.sns_topic_arn
-                        }
-                    ]
-                }
-                
-                sns_policy_response = iam_client.create_policy(
-                    PolicyName='DriftDetectionSNSPublishPolicy',
-                    PolicyDocument=json.dumps(sns_policy),
-                    Description='Allow Lambda to publish to SNS topic'
-                )
-                
-                iam_client.attach_role_policy(
-                    RoleName=role_name,
-                    PolicyArn=sns_policy_response['Policy']['Arn']
-                )
-                
                 # Wait for role to propagate
                 import time
                 time.sleep(10)
+            
+            # Create and attach SNS publish policy if it doesn't exist
+            if not role_exists or self._check_sns_policy_needed(role_name):
+                try:
+                    # Check if the policy already exists
+                    sns_policy_exists = False
+                    try:
+                        sns_policy = iam_client.get_policy(PolicyArn=f"arn:aws:iam::{self._get_account_id()}:policy/DriftDetectionSNSPublishPolicy")
+                        sns_policy_exists = True
+                    except ClientError:
+                        pass
+                    
+                    if not sns_policy_exists:
+                        # Create SNS publish policy
+                        sns_policy = {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": "sns:Publish",
+                                    "Resource": self.sns_topic_arn
+                                }
+                            ]
+                        }
+                        
+                        sns_policy_response = iam_client.create_policy(
+                            PolicyName='DriftDetectionSNSPublishPolicy',
+                            PolicyDocument=json.dumps(sns_policy),
+                            Description='Allow Lambda to publish to SNS topic'
+                        )
+                        
+                    # Check if policy is already attached
+                    attached_policies = iam_client.list_attached_role_policies(RoleName=role_name)
+                    policy_attached = False
+                    
+                    for policy in attached_policies.get('AttachedPolicies', []):
+                        if 'DriftDetectionSNSPublishPolicy' in policy.get('PolicyName', ''):
+                            policy_attached = True
+                            break
+                    
+                    if not policy_attached:
+                        policy_arn = f"arn:aws:iam::{self._get_account_id()}:policy/DriftDetectionSNSPublishPolicy"
+                        iam_client.attach_role_policy(
+                            RoleName=role_name,
+                            PolicyArn=policy_arn
+                        )
+                        logger.info(f"Attached SNS publish policy to role: {role_name}")
+                
+                except Exception as e:
+                    logger.warning(f"Error managing SNS policy: {str(e)}")
             
             # Define Lambda function code with single quotes
             lambda_code = '''
@@ -393,56 +468,96 @@ GeniDetect
                 with open(temp_zip.name, 'rb') as f:
                     zip_bytes = f.read()
             
-            # Create or update Lambda function
-            function_name = 'DriftDetectionFunction'
-            
-            try:
-                # Try to get the function if it exists
-                lambda_client.get_function(FunctionName=function_name)
-                
-                # Update the function if it exists
-                update_response = lambda_client.update_function_code(
-                    FunctionName=function_name,
-                    ZipFile=zip_bytes,
-                    Publish=True
-                )
-                
-                function_arn = update_response['FunctionArn']
-                logger.info(f"Updated Lambda function: {function_arn}")
-                
-            except ClientError:
+            if lambda_exists:
+                # Check if we need to update the code
+                should_update = True
+                try:
+                    # Get the current configuration
+                    lambda_config = lambda_client.get_function_configuration(FunctionName=function_name)
+                    
+                    # If SNS topic ARN is stored in environment variables, we could compare and skip update
+                    # if it hasn't changed, but for simplicity, we'll update the function code
+                    
+                    # Update the function if it exists
+                    update_response = lambda_client.update_function_code(
+                        FunctionName=function_name,
+                        ZipFile=zip_bytes,
+                        Publish=True
+                    )
+                    
+                    function_arn = update_response['FunctionArn']
+                    logger.info(f"Updated Lambda function: {function_arn}")
+                except ClientError as e:
+                    logger.error(f"Error updating Lambda function: {str(e)}")
+                    return {
+                        "status": "error",
+                        "message": f"Error updating Lambda function: {str(e)}"
+                    }
+            else:
                 # Create the function if it doesn't exist
-                create_response = lambda_client.create_function(
-                    FunctionName=function_name,
-                    Runtime='python3.9',
-                    Role=role_arn,
-                    Handler='lambda_function.lambda_handler',
-                    Code={'ZipFile': zip_bytes},
-                    Description='Process EventBridge events and send drift notifications',
-                    Timeout=30,
-                    MemorySize=128,
-                    Publish=True
-                )
-                
-                function_arn = create_response['FunctionArn']
-                logger.info(f"Created Lambda function: {function_arn}")
+                try:
+                    create_response = lambda_client.create_function(
+                        FunctionName=function_name,
+                        Runtime='python3.9',
+                        Role=role_arn,
+                        Handler='lambda_function.lambda_handler',
+                        Code={'ZipFile': zip_bytes},
+                        Description='Process EventBridge events and send drift notifications',
+                        Timeout=30,
+                        MemorySize=128,
+                        Publish=True
+                    )
+                    
+                    function_arn = create_response['FunctionArn']
+                    logger.info(f"Created Lambda function: {function_arn}")
+                except ClientError as e:
+                    logger.error(f"Error creating Lambda function: {str(e)}")
+                    return {
+                        "status": "error",
+                        "message": f"Error creating Lambda function: {str(e)}"
+                    }
             
             # Store Lambda function ARN
             shared_memory.set("notification_lambda_function_arn", function_arn)
             
             return {
                 "status": "success",
-                "message": f"Lambda function created/updated successfully",
-                "function_arn": function_arn
+                "message": f"Lambda function {'updated' if lambda_exists else 'created'} successfully",
+                "function_arn": function_arn,
+                "function_existed": lambda_exists
             }
             
         except Exception as e:
-            error_msg = f"Error creating Lambda function: {str(e)}"
+            error_msg = f"Error managing Lambda function: {str(e)}"
             logger.error(error_msg)
             return {
                 "status": "error",
                 "message": error_msg
             }
+    
+    def _check_sns_policy_needed(self, role_name: str) -> bool:
+        """Check if SNS policy needs to be attached to the role."""
+        try:
+            iam_client = boto3.client('iam', region_name=self.aws_region)
+            attached_policies = iam_client.list_attached_role_policies(RoleName=role_name)
+            
+            for policy in attached_policies.get('AttachedPolicies', []):
+                if 'SNSPublish' in policy.get('PolicyName', ''):
+                    return False
+            
+            return True
+        except Exception as e:
+            logger.warning(f"Error checking SNS policy: {str(e)}")
+            return True
+    
+    def _get_account_id(self) -> str:
+        """Get the AWS account ID."""
+        try:
+            sts_client = boto3.client('sts', region_name=self.aws_region)
+            return sts_client.get_caller_identity()["Account"]
+        except Exception as e:
+            logger.error(f"Error getting account ID: {str(e)}")
+            return "000000000000"  # Fallback
     
     def _setup_eventbridge_rule(self, 
                                rule_name: Optional[str] = None,
@@ -474,6 +589,65 @@ GeniDetect
             # Create EventBridge client
             events_client = boto3.client('events', region_name=self.aws_region)
             
+            # Check if rule already exists in shared memory or in AWS
+            existing_rule_info = shared_memory.get("notification_eventbridge_rule", {})
+            existing_rule_name = existing_rule_info.get("rule_name")
+            existing_s3_rule_name = existing_rule_info.get("s3_rule_name")
+            existing_lambda_arn = existing_rule_info.get("lambda_function_arn")
+            
+            # Check if the rules exist in AWS
+            rule_exists = False
+            s3_rule_exists = False
+            rule_arn = None
+            s3_rule_arn = None
+            
+            if existing_rule_name:
+                try:
+                    rule_response = events_client.describe_rule(Name=existing_rule_name)
+                    rule_exists = True
+                    rule_arn = rule_response.get('Arn')
+                    rule_name = existing_rule_name
+                    logger.info(f"Using existing EventBridge rule: {rule_name}")
+                except ClientError:
+                    logger.info(f"Existing rule {existing_rule_name} not found, will create new rule")
+            
+            if existing_s3_rule_name:
+                try:
+                    s3_rule_response = events_client.describe_rule(Name=existing_s3_rule_name)
+                    s3_rule_exists = True
+                    s3_rule_arn = s3_rule_response.get('Arn')
+                    s3_rule_name = existing_s3_rule_name
+                    logger.info(f"Using existing S3 EventBridge rule: {s3_rule_name}")
+                except ClientError:
+                    logger.info(f"Existing S3 rule {existing_s3_rule_name} not found, will create new rule")
+            
+            # Create Lambda function for processing events if it doesn't exist
+            if existing_lambda_arn:
+                lambda_client = boto3.client('lambda', region_name=self.aws_region)
+                try:
+                    lambda_response = lambda_client.get_function(FunctionName='DriftDetectionFunction')
+                    lambda_function_arn = lambda_response['Configuration']['FunctionArn']
+                    logger.info(f"Using existing Lambda function: {lambda_function_arn}")
+                except ClientError:
+                    # Function doesn't exist, create it
+                    logger.info("Existing Lambda function not found, will create new function")
+                    lambda_result = self._create_lambda_function()
+                    if lambda_result["status"] != "success":
+                        return {
+                            "status": "error",
+                            "message": f"Failed to create Lambda function: {lambda_result['message']}"
+                        }
+                    lambda_function_arn = lambda_result["function_arn"]
+            else:
+                # Create new Lambda function
+                lambda_result = self._create_lambda_function()
+                if lambda_result["status"] != "success":
+                    return {
+                        "status": "error",
+                        "message": f"Failed to create Lambda function: {lambda_result['message']}"
+                    }
+                lambda_function_arn = lambda_result["function_arn"]
+            
             # Create event pattern for AWS API calls related to the specified resource types
             # This pattern will match any API call that creates, updates, or deletes resources
             event_pattern = {
@@ -496,30 +670,55 @@ GeniDetect
                 }
             }
             
-            # Create the EventBridge rule
-            rule_response = events_client.put_rule(
-                Name=rule_name,
-                EventPattern=json.dumps(event_pattern),
-                State='ENABLED',
-                Description=f'Detect infrastructure changes for drift notification'
-            )
+            # Create or update the EventBridge rule
+            if not rule_exists:
+                rule_response = events_client.put_rule(
+                    Name=rule_name,
+                    EventPattern=json.dumps(event_pattern),
+                    State='ENABLED',
+                    Description=f'Detect infrastructure changes for drift notification'
+                )
+                rule_arn = rule_response['RuleArn']
+                logger.info(f"Created new EventBridge rule: {rule_arn}")
+            else:
+                # Update existing rule to ensure configuration is correct
+                events_client.put_rule(
+                    Name=rule_name,
+                    EventPattern=json.dumps(event_pattern),
+                    State='ENABLED',
+                    Description=f'Detect infrastructure changes for drift notification'
+                )
+                logger.info(f"Updated existing EventBridge rule: {rule_name}")
             
-            rule_arn = rule_response['RuleArn']
+            # Create a separate rule for S3 events if it doesn't exist
+            s3_rule_name = existing_s3_rule_name or f"{rule_name}-S3Events"
+            s3_event_pattern = {
+                "source": ["aws.s3"],
+                "detail-type": ["Object Created", "Object Deleted", "Object Restored", "Object Tagging"]
+            }
             
-            # Create Lambda function for processing events
-            lambda_result = self._create_lambda_function()
-            if lambda_result["status"] != "success":
-                return {
-                    "status": "error",
-                    "message": f"Failed to create Lambda function: {lambda_result['message']}"
-                }
+            if not s3_rule_exists:
+                s3_rule_response = events_client.put_rule(
+                    Name=s3_rule_name,
+                    EventPattern=json.dumps(s3_event_pattern),
+                    State='ENABLED',
+                    Description=f'Detect S3 object changes for drift notification'
+                )
+                s3_rule_arn = s3_rule_response['RuleArn']
+                logger.info(f"Created new S3 EventBridge rule: {s3_rule_arn}")
+            else:
+                # Update existing S3 rule
+                events_client.put_rule(
+                    Name=s3_rule_name,
+                    EventPattern=json.dumps(s3_event_pattern),
+                    State='ENABLED',
+                    Description=f'Detect S3 object changes for drift notification'
+                )
+                logger.info(f"Updated existing S3 EventBridge rule: {s3_rule_name}")
             
-            lambda_function_arn = lambda_result["function_arn"]
-            
-            # Add Lambda as target for the rule
             lambda_client = boto3.client('lambda', region_name=self.aws_region)
             
-            # Add permission for EventBridge to invoke the Lambda function
+            # Add permission for EventBridge to invoke the Lambda function if needed
             try:
                 lambda_client.add_permission(
                     FunctionName='DriftDetectionFunction',
@@ -528,39 +727,13 @@ GeniDetect
                     Principal='events.amazonaws.com',
                     SourceArn=rule_arn
                 )
+                logger.info(f"Added Lambda permission for rule: {rule_name}")
             except ClientError as e:
                 # If the permission already exists, continue
                 if 'ResourceConflictException' not in str(e):
-                    raise e
+                    logger.warning(f"Error adding Lambda permission: {str(e)}")
             
-            # Add Lambda as target for the rule
-            target_response = events_client.put_targets(
-                Rule=rule_name,
-                Targets=[
-                    {
-                        'Id': 'DriftDetectionLambdaTarget',
-                        'Arn': lambda_function_arn
-                    }
-                ]
-            )
-            
-            # Create a separate rule for S3 events
-            s3_rule_name = f"{rule_name}-S3Events"
-            s3_event_pattern = {
-                "source": ["aws.s3"],
-                "detail-type": ["Object Created", "Object Deleted", "Object Restored", "Object Tagging"]
-            }
-            
-            s3_rule_response = events_client.put_rule(
-                Name=s3_rule_name,
-                EventPattern=json.dumps(s3_event_pattern),
-                State='ENABLED',
-                Description=f'Detect S3 object changes for drift notification'
-            )
-            
-            s3_rule_arn = s3_rule_response['RuleArn']
-            
-            # Add permission for EventBridge to invoke the Lambda function for S3 events
+            # Add permission for EventBridge to invoke the Lambda function for S3 events if needed
             try:
                 lambda_client.add_permission(
                     FunctionName='DriftDetectionFunction',
@@ -569,21 +742,61 @@ GeniDetect
                     Principal='events.amazonaws.com',
                     SourceArn=s3_rule_arn
                 )
+                logger.info(f"Added Lambda permission for S3 rule: {s3_rule_name}")
             except ClientError as e:
                 # If the permission already exists, continue
                 if 'ResourceConflictException' not in str(e):
-                    raise e
+                    logger.warning(f"Error adding Lambda permission for S3 events: {str(e)}")
             
-            # Add Lambda as target for the S3 rule
-            s3_target_response = events_client.put_targets(
-                Rule=s3_rule_name,
-                Targets=[
-                    {
-                        'Id': 'S3DriftDetectionLambdaTarget',
-                        'Arn': lambda_function_arn
-                    }
-                ]
-            )
+            # Check and update targets for the main rule
+            try:
+                existing_targets = events_client.list_targets_by_rule(Rule=rule_name)
+                lambda_target_exists = False
+                
+                for target in existing_targets.get('Targets', []):
+                    if target.get('Arn') == lambda_function_arn:
+                        lambda_target_exists = True
+                        break
+                
+                if not lambda_target_exists:
+                    # Add Lambda as target for the rule
+                    events_client.put_targets(
+                        Rule=rule_name,
+                        Targets=[
+                            {
+                                'Id': 'DriftDetectionLambdaTarget',
+                                'Arn': lambda_function_arn
+                            }
+                        ]
+                    )
+                    logger.info(f"Added Lambda target to rule: {rule_name}")
+            except ClientError as e:
+                logger.warning(f"Error checking/updating rule targets: {str(e)}")
+            
+            # Check and update targets for the S3 rule
+            try:
+                existing_s3_targets = events_client.list_targets_by_rule(Rule=s3_rule_name)
+                s3_lambda_target_exists = False
+                
+                for target in existing_s3_targets.get('Targets', []):
+                    if target.get('Arn') == lambda_function_arn:
+                        s3_lambda_target_exists = True
+                        break
+                
+                if not s3_lambda_target_exists:
+                    # Add Lambda as target for the S3 rule
+                    events_client.put_targets(
+                        Rule=s3_rule_name,
+                        Targets=[
+                            {
+                                'Id': 'S3DriftDetectionLambdaTarget',
+                                'Arn': lambda_function_arn
+                            }
+                        ]
+                    )
+                    logger.info(f"Added Lambda target to S3 rule: {s3_rule_name}")
+            except ClientError as e:
+                logger.warning(f"Error checking/updating S3 rule targets: {str(e)}")
             
             # Enable S3 to send events to EventBridge for all buckets
             s3_client = boto3.client('s3', region_name=self.aws_region)
@@ -616,18 +829,21 @@ GeniDetect
                 "s3_rule_arn": s3_rule_arn,
                 "lambda_function_arn": lambda_function_arn,
                 "resource_types": resource_types,
-                "creation_time": datetime.now().isoformat()
+                "creation_time": datetime.now().isoformat(),
+                "last_update_time": datetime.now().isoformat()
             })
             
-            logger.info(f"EventBridge rule created: {rule_arn}")
+            logger.info(f"EventBridge rules configured: {rule_name}, {s3_rule_name}")
             
             return {
                 "status": "success",
-                "message": f"EventBridge rules and Lambda function created successfully",
+                "message": f"EventBridge rules and Lambda function {'updated' if rule_exists else 'created'} successfully",
                 "rule_arn": rule_arn,
                 "s3_rule_arn": s3_rule_arn,
                 "lambda_function_arn": lambda_function_arn,
-                "resource_types": resource_types
+                "resource_types": resource_types,
+                "rule_existed": rule_exists,
+                "s3_rule_existed": s3_rule_exists
             }
             
         except ClientError as e:
@@ -923,10 +1139,30 @@ GeniDetect
             Dict with status and message
         """
         try:
-            # Set up components in order
+            # Check for existing monitoring setup
+            existing_monitoring = shared_memory.get("notification_monitoring_active", False)
+            existing_topic_arn = shared_memory.get("notification_sns_topic_arn")
+            existing_lambda_arn = shared_memory.get("notification_lambda_function_arn")
+            existing_rule_info = shared_memory.get("notification_eventbridge_rule", {})
+            
+            setup_components = {
+                "sns": not existing_topic_arn,
+                "lambda": not existing_lambda_arn,
+                "eventbridge": not existing_rule_info,
+                "config": False  # Always check config setup status separately
+            }
+            
+            results = {
+                "sns": {"status": "skipped", "message": "Using existing SNS topic"},
+                "eventbridge": {"status": "skipped", "message": "Using existing EventBridge rules"},
+                "lambda": {"status": "skipped", "message": "Using existing Lambda function"},
+                "config": {"status": "skipped", "message": "AWS Config setup skipped"},
+                "test_notification": {"status": "skipped", "message": "Test notification skipped"},
+            }
             
             # 1. Set up SNS topic first
             sns_result = self._setup_sns_topic()
+            results["sns"] = sns_result
             if sns_result["status"] != "success":
                 return {
                     "status": "error",
@@ -934,14 +1170,23 @@ GeniDetect
                     "details": sns_result
                 }
             
-            # 2. Set up EventBridge rule
+            # 2. Set up EventBridge rule - will automatically set up Lambda function
             eventbridge_result = self._setup_eventbridge_rule()
+            results["eventbridge"] = eventbridge_result
             if eventbridge_result["status"] != "success":
                 return {
                     "status": "error",
                     "message": f"Failed to set up EventBridge rule: {eventbridge_result['message']}",
-                    "sns_setup": sns_result,
-                    "eventbridge_setup": eventbridge_result
+                    "components": results
+                }
+                
+            # Record Lambda function result
+            lambda_function_arn = eventbridge_result.get("lambda_function_arn")
+            if lambda_function_arn:
+                results["lambda"] = {
+                    "status": "success",
+                    "message": f"Lambda function {'updated' if 'function_existed' in eventbridge_result else 'created'} successfully",
+                    "function_arn": lambda_function_arn
                 }
             
             # 3. Set up AWS Config (optional, can continue if this fails)
@@ -951,10 +1196,11 @@ GeniDetect
             if setup_aws_config:
                 try:
                     config_result = self._setup_aws_config()
+                    results["config"] = config_result
                     logger.info("AWS Config setup result: %s", config_result)
                 except Exception as config_error:
                     logger.warning(f"AWS Config setup failed but continuing: {str(config_error)}")
-                    config_result = {
+                    results["config"] = {
                         "status": "error",
                         "message": f"AWS Config setup failed but continuing: {str(config_error)}"
                     }
@@ -963,39 +1209,44 @@ GeniDetect
             test_notification_result = {"status": "skipped", "message": "Test notification skipped"}
             try:
                 if self.sns_topic_arn:
-                    test_notification_result = self._send_test_notification()
+                    # Only send a test notification for new setups or if explicitly requested
+                    if not existing_monitoring or setup_components["sns"]:
+                        test_notification_result = self._send_test_notification()
+                        results["test_notification"] = test_notification_result
             except Exception as notification_error:
                 logger.warning(f"Test notification failed but continuing: {str(notification_error)}")
-                test_notification_result = {
+                results["test_notification"] = {
                     "status": "error",
                     "message": f"Test notification failed but continuing: {str(notification_error)}"
                 }
             
             # Store monitoring configuration in shared memory
             shared_memory.set("notification_monitoring_active", True)
-            shared_memory.set("notification_monitoring_start_time", datetime.now().isoformat())
+            if not shared_memory.get("notification_monitoring_start_time"):
+                shared_memory.set("notification_monitoring_start_time", datetime.now().isoformat())
+            shared_memory.set("notification_monitoring_last_update", datetime.now().isoformat())
             
             # Check notification system status
             status_result = {"status": "skipped", "message": "Status check skipped"}
             try:
                 status_result = self._check_notification_status()
+                results["system_status"] = status_result.get("notification_system", {})
             except Exception as status_error:
                 logger.warning(f"Status check failed but continuing: {str(status_error)}")
-                status_result = {
+                results["system_status"] = {
                     "status": "error", 
                     "message": f"Status check failed but continuing: {str(status_error)}"
                 }
             
+            # Determine if this was an update or new setup
+            is_update = existing_monitoring
+            
             return {
                 "status": "success",
-                "message": "AWS-native drift notification system set up successfully",
-                "components": {
-                    "sns": sns_result,
-                    "eventbridge": eventbridge_result,
-                    "config": config_result,
-                    "test_notification": test_notification_result,
-                    "system_status": status_result.get("notification_system", {})
-                }
+                "message": f"AWS-native drift notification system {('updated' if is_update else 'set up')} successfully",
+                "is_update": is_update,
+                "recipient_email": self.recipient_email,
+                "components": results
             }
             
         except Exception as e:

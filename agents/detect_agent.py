@@ -87,11 +87,23 @@ class DetectAgent:
     
     def _create_agent(self) -> Agent:
         """Create the detect agent instance"""
+        # Define the use_aws_parallel tool wrapper - needed because this is a method
+        # Adding this tool to the agent's tools
+        @tool
+        def use_aws_parallel_wrapper(tasks):
+            """
+            Execute multiple AWS API calls in parallel.
+            
+            Args:
+                tasks: List of dictionaries, each containing service_name, operation_name, and parameters
+            """
+            return self.use_aws_parallel(tasks)
+            
         # Create tools list based on availability of read_tfstate
         if read_tfstate:
-            tools = [use_aws, cloudtrail_logs, cloudwatch_logs, read_tfstate, terraform_plan]
+            tools = [use_aws, cloudtrail_logs, cloudwatch_logs, read_tfstate, terraform_plan, use_aws_parallel_wrapper]
         else:
-            tools = [use_aws, cloudtrail_logs, cloudwatch_logs, terraform_plan]
+            tools = [use_aws, cloudtrail_logs, cloudwatch_logs, terraform_plan, use_aws_parallel_wrapper]
         
         agent = Agent(
             model=self.model,
@@ -449,4 +461,108 @@ class DetectAgent:
             
         logger.info(f"Successfully retrieved AWS credentials from shared memory for session {session_id}")
         return credentials
+    
+    def _use_aws_task(self, service_name, operation_name, parameters):
+        """
+        Helper function to execute a single AWS API task.
+        This is used by use_aws_parallel to execute individual calls.
+        
+        Args:
+            service_name: AWS service to call (e.g., 's3', 'ec2', 'iam')
+            operation_name: Operation to perform (e.g., 'list_buckets', 'describe_instances')
+            parameters: Dict of parameters to pass to the operation
+            
+        Returns:
+            Dict containing the result of the AWS operation
+        """
+        try:
+            # Use the existing use_aws tool to make the call
+            result = use_aws(service_name=service_name, operation_name=operation_name, parameters=parameters)
+            return {
+                "service": service_name,
+                "operation": operation_name,
+                "status": "success",
+                "result": result,
+                "error": None
+            }
+        except Exception as e:
+            logger.error(f"Error executing AWS API call {service_name}.{operation_name}: {e}")
+            return {
+                "service": service_name,
+                "operation": operation_name,
+                "status": "error",
+                "result": None,
+                "error": str(e)
+            }
+
+    @tool
+    def use_aws_parallel(self, tasks):
+        """
+        Execute multiple AWS API calls in parallel using concurrent processing.
+        
+        Args:
+            tasks: List of dictionaries, each containing:
+                - service_name: AWS service to call (e.g., 's3', 'ec2', 'iam')
+                - operation_name: Operation to perform (e.g., 'list_buckets', 'describe_instances')
+                - parameters: Dict of parameters to pass to the operation
+        
+        Returns:
+            Dict of results, with keys matching the service_name and operation_name of each task
+        """
+        import concurrent.futures
+        
+        results = {}
+        
+        try:
+            logger.info(f"Executing {len(tasks)} AWS tasks in parallel")
+            
+            # Use ThreadPoolExecutor to run tasks in parallel
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                # Start all tasks and collect the futures
+                futures = []
+                for task in tasks:
+                    service_name = task.get("service_name")
+                    operation_name = task.get("operation_name")
+                    parameters = task.get("parameters", {})
+                    
+                    # Validate required parameters
+                    if not service_name or not operation_name:
+                        logger.error(f"Invalid task, missing service_name or operation_name: {task}")
+                        continue
+                    
+                    # Submit task to executor
+                    future = executor.submit(
+                        self._use_aws_task,
+                        service_name,
+                        operation_name,
+                        parameters
+                    )
+                    futures.append((future, service_name, operation_name))
+                
+                # Collect results as they complete
+                for future, service_name, operation_name in futures:
+                    try:
+                        task_result = future.result()
+                        result_key = f"{service_name}.{operation_name}"
+                        results[result_key] = task_result
+                    except Exception as e:
+                        logger.error(f"Exception in parallel task {service_name}.{operation_name}: {e}")
+                        results[f"{service_name}.{operation_name}"] = {
+                            "service": service_name,
+                            "operation": operation_name,
+                            "status": "error",
+                            "result": None,
+                            "error": str(e)
+                        }
+            
+            logger.info(f"Completed {len(results)} parallel AWS tasks")
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error executing parallel AWS tasks: {e}")
+            return {
+                "status": "error",
+                "error": str(e),
+                "results": results
+            }
     
