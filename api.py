@@ -1964,6 +1964,10 @@ async def setup_notifications(config: NotificationConfig):
         if not notification_agent:
             raise HTTPException(status_code=404, detail="Notification agent not available")
         
+        # Check if notifications are already set up
+        existing_setup = shared_memory.get("notification_monitoring_active", False)
+        existing_email = shared_memory.get("notification_recipient_email")
+        
         # Set recipient email
         email_result = notification_agent.set_recipient_email(config.recipient_emails)
         if email_result.get("status") != "success":
@@ -1978,17 +1982,37 @@ async def setup_notifications(config: NotificationConfig):
             "resource_types": config.resource_types,
             "setup_aws_config": config.setup_aws_config,
             "include_global_resources": config.include_global_resources,
-            "setup_time": datetime.now().isoformat()
+            "setup_time": datetime.now().isoformat(),
+            "last_update_time": datetime.now().isoformat()
         })
         
         # Start monitoring with AWS-native services
         monitoring_result = notification_agent.start_continuous_monitoring()
         
+        if monitoring_result.get("status") != "success":
+            logger.error(f"Error in notification setup: {monitoring_result}")
+            
+            # Even if there was an error, some components might have been set up successfully
+            return {
+                "status": "partial",
+                "message": f"Partial setup completed with issues: {monitoring_result.get('message')}",
+                "recipient_email": config.recipient_emails,
+                "details": monitoring_result,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Determine if this was an update or new setup
+        is_update = monitoring_result.get("is_update", existing_setup)
+        action_verb = "updated" if is_update else "set up"
+        
         return {
-            "message": f"AWS-native notification monitoring setup successfully for {config.recipient_emails}",
+            "status": "success",
+            "message": f"AWS-native notification monitoring {action_verb} successfully for {config.recipient_emails}",
             "resource_types": config.resource_types or "All critical resources",
             "aws_config_enabled": config.setup_aws_config,
             "monitoring_status": monitoring_result,
+            "previous_email": existing_email if is_update else None,
+            "is_update": is_update,
             "timestamp": datetime.now().isoformat()
         }
         
