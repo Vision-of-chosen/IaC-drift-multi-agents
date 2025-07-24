@@ -70,7 +70,7 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["http://destroydrift.raiijino.buzz"],  # hoặc domain thật của frontend
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -129,10 +129,38 @@ class AWSCredentials(BaseModel):
     user_id: Optional[str] = Field(None, description="User ID for credential association")
 
 class NotificationConfig(BaseModel):
-    recipient_emails: List[str] = Field(..., description="List of email addresses to receive notifications")
+    recipient_emails: str = Field(..., description="List of email addresses to receive notifications")
     resource_types: Optional[List[str]] = Field(None, description="List of AWS resource types to monitor")
     setup_aws_config: bool = Field(False, description="Whether to set up AWS Config for drift detection")
     include_global_resources: bool = Field(True, description="Whether to include global resources in monitoring")
+
+# Add these model definitions at the top of api.py with other models
+class DriftItem(BaseModel):
+    driftCode: str
+    resourceType: str
+    resourceName: str
+    riskLevel: str
+    beforeStateJson: str
+    afterStateJson: str
+    aiExplanation: str
+    aiAction: str
+
+class ReportResponse(BaseModel):
+    id: str
+    fileName: str
+    scanDate: datetime
+    status: str
+    totalResources: int
+    driftCount: int
+    riskLevel: str
+    duration: str
+    createdBy: str
+    createdOn: datetime
+    modifiedBy: str
+    drifts: List[DriftItem] = Field(default_factory=list)
+    
+    class Config:
+        orm_mode = True
 
 def create_and_register_boto3_session(user_id: str, agent_type: str, session_id: str) -> Optional[Boto3Session]:
     """
@@ -553,18 +581,28 @@ If handling conversationally:
             
             # Execute the agent
             result = agent(user_message)
-            
-            # Store result in shared memory
-            shared_memory.set(f"{agent_type}_last_result", str(result), session_id)
-            
-            # DO NOT clean up the boto3 session to maintain it for consecutive requests
-            # We want to keep the session available for future use
-            
-            # Restore original environment variables
-            if original_env:
-                restore_aws_env(original_env)
-            
-            return str(result)
+
+    # Auto-generate report after specific agent operations
+            if agent_type in ['detect', 'analyzer', 'remediate']:
+                try:
+                    logger.info(f"Auto-generating report after {agent_type} execution")
+                    report_result = self._execute_agent('report', f"Generate report for {agent_type} results", session_id)
+                    # Optional: append report summary to the original result
+                    result = f"{result}\n\n[Auto-generated report available]"
+                except Exception as e:
+                    logger.warning(f"Auto report generation failed: {e}")
+                
+                # Store result in shared memory
+                shared_memory.set(f"{agent_type}_last_result", str(result), session_id)
+                
+                # DO NOT clean up the boto3 session to maintain it for consecutive requests
+                # We want to keep the session available for future use
+                
+                # Restore original environment variables
+                if original_env:
+                    restore_aws_env(original_env)
+                
+                return str(result)
             
         except Exception as e:
             # Ensure we restore environment variables even if there's an error
@@ -1377,24 +1415,14 @@ async def upload_terraform_file(
         )
 
 
-@app.get("/report", summary="Get or Generate Drift Report")
+@app.get("/report", response_model=List[ReportResponse], summary="Get or Generate Drift Report")
 async def get_report(
     session_id: Optional[str] = None,
     session_id_header: Optional[str] = Depends(get_session_id_from_header),
     generate: bool = False,
     report_filename: Optional[str] = None
 ):
-    """Get or generate a JSON report of drift detection results
-    
-    Args:
-        session_id: Optional session ID to use for report generation/retrieval
-        session_id_header: Session ID from request header
-        generate: If True, force generation of a new report even if one exists
-        report_filename: Optional custom filename for the generated report
-        
-    Returns:
-        JSON response with report details and content
-    """
+    """Get or generate a JSON report of drift detection results"""
     try:
         # Use session_id from header if available, otherwise from parameter
         session_id = session_id_header or session_id
@@ -1414,32 +1442,9 @@ async def get_report(
         if existing_report and not generate and os.path.exists(existing_filename):
             logger.info(f"Using existing report for session {session_id}: {existing_filename}")
             
-            # Read the existing report file
-            try:
-                with open(existing_filename, "r") as f:
-                    report_content = json.load(f)
-            except Exception as e:
-                logger.error(f"Error reading existing report file: {e}")
-                report_content = {"error": f"Could not read existing report file: {e}"}
-                
-            # Return existing report
-            return {
-                "message": "Retrieved existing report",
-                "session_id": session_id,
-                "file_path": existing_filename,
-                "scan_details": {
-                    "id": existing_report.get("scanDetails", {}).get("id"),
-                    "fileName": existing_report.get("scanDetails", {}).get("fileName"),
-                    "scanDate": existing_report.get("scanDetails", {}).get("scanDate"),
-                    "status": existing_report.get("scanDetails", {}).get("status"),
-                    "totalResources": existing_report.get("scanDetails", {}).get("totalResources"),
-                    "driftCount": existing_report.get("scanDetails", {}).get("driftCount"),
-                    "riskLevel": existing_report.get("scanDetails", {}).get("riskLevel")
-                },
-                "total_drifts": len(existing_report.get("drifts", [])),
-                "report_content": report_content,
-                "newly_generated": False
-            }
+            # Transform existing report to the desired format
+            report_response = _transform_report_to_response_format(existing_report)
+            return [report_response]
         
         # No existing report or generation requested - generate a new one
         # Access the report agent
@@ -1458,36 +1463,75 @@ async def get_report(
         shared_memory.set("drift_json_report", report, session_id)
         shared_memory.set("drift_report_file", report_filename, session_id)
         
-        # Read the report file to return in response
-        try:
-            with open(report_filename, "r") as f:
-                report_content = json.load(f)
-        except Exception as e:
-            logger.error(f"Error reading report file: {e}")
-            report_content = {"error": f"Could not read report file: {e}"}
+        # Transform report to desired format
+        report_response = _transform_report_to_response_format(report)
         
-        # Return report details and content
-        return {
-            "message": "Report generated successfully",
-            "session_id": session_id,
-            "file_path": report_filename,
-            "scan_details": {
-                "id": report.get("scanDetails", {}).get("id"),
-                "fileName": report.get("scanDetails", {}).get("fileName"),
-                "scanDate": report.get("scanDetails", {}).get("scanDate"),
-                "status": report.get("scanDetails", {}).get("status"),
-                "totalResources": report.get("scanDetails", {}).get("totalResources"),
-                "driftCount": report.get("scanDetails", {}).get("driftCount"),
-                "riskLevel": report.get("scanDetails", {}).get("riskLevel")
-            },
-            "total_drifts": len(report.get("drifts", [])),
-            "report_content": report_content,
-            "newly_generated": True
-        }
-            
+        return [report_response]
     except Exception as e:
         logger.error(f"Error handling report: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to process report request: {e}")
+
+@app.post("/generate-report", response_model=List[ReportResponse], summary="Generate Drift Report")
+async def generate_report(
+    session_id: Optional[str] = None,
+    session_id_header: Optional[str] = Depends(get_session_id_from_header)
+):
+    """Generate a JSON report of drift detection results for a specific session"""
+    try:
+        # Use session_id from header if available, otherwise from parameter
+        session_id = session_id_header or session_id
+        
+        if not session_id:
+            # Generate a new session ID if none provided
+            session_id = str(uuid.uuid4())
+            logger.info(f"No session ID provided, generated new one: {session_id}")
+        
+        # Set the session in shared memory
+        shared_memory.set_session(session_id)
+        
+        # Get user_id for this session if available
+        user_id = shared_memory.get("user_id", session_id=session_id)
+        
+        # Generate a unique filename for this report
+        report_filename = f"report_{session_id}.json"
+        
+        # Access the report agent
+        report_agent = orchestrator.agents.get('report')
+        if not report_agent:
+            raise HTTPException(status_code=404, detail="Report agent not available")
+        
+        # If user_id exists, set up AWS session for this report generation
+        if user_id:
+            logger.info(f"Setting up AWS session for report generation using user_id: {user_id}")
+            create_and_register_boto3_session(user_id, "report", session_id)
+        
+        # Generate the report with the unique filename
+        report = report_agent.generate_json_report(report_filename)
+        
+        # Store report in shared memory with session ID
+        shared_memory.set("drift_json_report", report, session_id)
+        shared_memory.set("drift_report_file", report_filename, session_id)
+        
+        # If we have a user_id, store relationship between user and report
+        if user_id:
+            # Store in a global list of reports for this user
+            user_reports = shared_memory.get(f"user_reports_{user_id}", [])
+            report_info = {
+                "session_id": session_id,
+                "report_filename": report_filename,
+                "timestamp": datetime.now().isoformat(),
+                "scan_id": report.get("scanDetails", {}).get("id")
+            }
+            user_reports.append(report_info)
+            shared_memory.set(f"user_reports_{user_id}", user_reports)
+        
+        # Transform report to desired format
+        report_response = _transform_report_to_response_format(report)
+        
+        return [report_response]
+    except Exception as e:
+        logger.error(f"Error generating report: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate report: {e}")
 
 
 @app.get("/terraform-status", summary="Get Terraform Files Status")
@@ -1604,7 +1648,7 @@ async def set_aws_credentials(
         os.environ["AWS_ACCESS_KEY_ID"] = credentials.aws_access_key_id
         os.environ["AWS_SECRET_ACCESS_KEY"] = credentials.aws_secret_access_key
         os.environ["AWS_REGION"] = credentials.aws_region
-        
+
         # Store globally for user-specific access
         user_credentials_key = f"aws_credentials_{user_id}"
         shared_memory.set(user_credentials_key, aws_credentials)
@@ -2958,6 +3002,64 @@ async def get_current_session_info():
             "error": str(e),
             "timestamp": datetime.now().isoformat()
         }
+
+def _transform_report_to_response_format(report: Dict[str, Any]) -> ReportResponse:
+    """Transform internal report format to API response format"""
+    # Extract drifts
+    drifts = []
+    for drift in report.get("drifts", []):
+        drifts.append(DriftItem(
+            driftCode=drift.get("driftCode", ""),
+            resourceType=drift.get("resourceType", ""),
+            resourceName=drift.get("resourceName", ""),
+            riskLevel=drift.get("riskLevel", "medium"),
+            beforeStateJson=drift.get("beforeStateJson", "{}"),
+            afterStateJson=drift.get("afterStateJson", "{}"),
+            aiExplanation=drift.get("aiExplanation", ""),
+            aiAction=drift.get("aiAction", "")
+        ))
+    
+    # Đảm bảo createdOn là datetime object
+    created_on = report.get("createdOn", "")
+    if isinstance(created_on, str):
+        try:
+            created_on = datetime.fromisoformat(created_on.replace("Z", "+00:00"))
+        except:
+            created_on = datetime.now()
+    
+    # Đảm bảo scanDate là datetime object
+    scan_date = report.get("scanDate", "")
+    if isinstance(scan_date, str):
+        try:
+            scan_date = datetime.fromisoformat(scan_date.replace("Z", "+00:00"))
+        except:
+            scan_date = datetime.now()
+    
+    duration = report.get("duration", "00:00:00")
+    if isinstance(duration, str) and ":" not in duration:
+
+        try:
+            seconds = float(duration.replace("s", ""))
+            hours, remainder = divmod(int(seconds), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        except:
+            duration = "00:00:00"
+    # Create report response
+    return ReportResponse(
+        id=report.get("id", ""),
+        fileName=report.get("fileName", ""),
+        scanDate=scan_date,
+        status=report.get("status", "completed"),
+        totalResources=report.get("totalResources", 0),
+        driftCount=report.get("driftCount", 0),
+        riskLevel=report.get("riskLevel", "low"),
+        duration=duration,
+        createdBy=report.get("createdBy", "system"),
+        createdOn=created_on,
+        modifiedBy=report.get("modifiedBy", "system"),
+        drifts=drifts
+    )
 
 if __name__ == "__main__":
     # Ensure terraform directory exists

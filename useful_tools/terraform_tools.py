@@ -141,7 +141,7 @@ def terraform_plan(
             logger.info(f"Available tools from Terraform tools MCP server: {tool_names}")
             
             # Check if terraform directory is initialized by looking for .terraform folder
-            terraform_init_dir = os.path.join(terraform_dir, ".terraform")
+            terraform_init_dir = os.path.join(terraform_dir, "./terraform")
             init_output = ""
             
             if not os.path.exists(terraform_init_dir):

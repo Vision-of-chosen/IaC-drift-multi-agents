@@ -26,15 +26,12 @@ sys.path.append(useful_tools_path)
 
 logger = logging.getLogger(__name__)
 
-from strands import Agent, tool
+from strands import Agent
 from strands.agent.state import AgentState
 from strands.models.bedrock import BedrockModel
-# Try to import our wrapped use_aws first, fall back to original if not available
 from strands_tools import use_aws
-import boto3
-from botocore.exceptions import ClientError
-
-from prompts import AgentPrompts
+from useful_tools import cloudtrail_logs
+from useful_tools import cloudwatch_logs
 from shared_memory import shared_memory
 from config import BEDROCK_REGION
 
@@ -48,22 +45,20 @@ class NotificationAgent:
         """Initialize the notification agent with a language model."""
         self.model = model
         self.agent = self._create_agent()
-        self.recipient_email = "nguyenxuanlamnghean123@gmail.com"  # Default recipient for backward compatibility
-        self.recipient_emails = ["nguyenxuanlamnghean123@gmail.com"]  # Default recipient list
-        self.aws_region = os.environ.get("AWS_REGION", BEDROCK_REGION)
+        self.recipient_email = "nguyenxuanlamnghean123@gmail.com"  # Default recipient
+        self.aws_region = os.environ.get("AWS_REGION", "ap-southeast-2")
         self.sns_topic_arn = None
         self.eventbridge_rule_name = "DriftDetectionRule"
         self.config_recorder_name = "DriftConfigRecorder"
         
     def _create_agent(self) -> Agent:
         """Create and configure the notification agent."""
-        # Create a wrapper for use_aws that automatically includes the session key
         agent = Agent(
             name="NotificationAgent",
             model=self.model,
             description="Monitors AWS infrastructure changes and sends email notifications about potential drift using AWS-native services",
             tools=[
-                use_aws,
+                use_aws.use_aws,
                 self._set_shared_memory_wrapper,
                 self._setup_eventbridge_rule,
                 self._setup_sns_topic,
@@ -79,48 +74,38 @@ class NotificationAgent:
         )
         return agent
     
-    def set_recipient_email(self, emails: List[str]) -> Dict[str, Any]:
+    def set_recipient_email(self, email: str) -> Dict[str, Any]:
         """
-        Set the recipient email addresses for notifications.
+        Set the recipient email address for notifications.
         
         Args:
-            emails: List of email addresses to send notifications to
+            email: Email address to send notifications to
             
         Returns:
             Dict with status and message
         """
         try:
-            # Validate email format for all emails (basic validation)
-            invalid_emails = []
-            for email in emails:
-                if '@' not in email or '.' not in email:
-                    invalid_emails.append(email)
-            
-            if invalid_emails:
+            # Validate email format (basic validation)
+            if '@' not in email or '.' not in email:
                 return {
                     "status": "error",
-                    "message": f"Invalid email format for: {', '.join(invalid_emails)}"
+                    "message": f"Invalid email format: {email}"
                 }
             
-            # Set the recipient emails
-            self.recipient_emails = emails
-            # For backward compatibility, also set the first email as recipient_email
-            if emails:
-                self.recipient_email = emails[0]
+            # Set the recipient email
+            self.recipient_email = email
             
             # Update shared memory
-            shared_memory.set("notification_recipient_emails", emails)
-            if emails:
-                shared_memory.set("notification_recipient_email", emails[0])
+            shared_memory.set("notification_recipient_email", email)
             
-            logger.info(f"Notification recipient emails set to: {emails}")
+            logger.info(f"Notification recipient email set to: {email}")
             
             return {
                 "status": "success",
-                "message": f"Recipient emails set to: {emails}"
+                "message": f"Recipient email set to: {email}"
             }
         except Exception as e:
-            error_msg = f"Error setting recipient emails: {str(e)}"
+            error_msg = f"Error setting recipient email: {str(e)}"
             logger.error(error_msg)
             return {
                 "status": "error",
@@ -132,25 +117,13 @@ class NotificationAgent:
         return self.agent
     
     def update_shared_memory(self) -> None:
-        """Update agent state with current shared memory"""
-        # Create a new state object with updated shared memory
+        """Update agent state with current shared memory."""
         if hasattr(self.agent, 'state'):
             self.agent.state.shared_memory = shared_memory.data
-            
-            # Add session key to state if available
-            session_id = shared_memory.get_current_session()
-            if session_id:
-                session_key = f"notification_{session_id}"
-                self.agent.state.aws_session_key = session_key
         else:
-            session_id = shared_memory.get_current_session()
-            session_key = f"notification_{session_id}" if session_id else None
-            
             self.agent.state = AgentState({
                 "shared_memory": shared_memory.data,
                 "agent_type": "notification",
-                "aws_region": self.aws_region,
-                "aws_session_key": session_key,
                 "last_notification_time": datetime.now().isoformat()
             })
     
@@ -174,7 +147,7 @@ class NotificationAgent:
     
     def _setup_sns_topic(self, topic_name: str = "DriftAlertTopic") -> Dict[str, Any]:
         """
-        Set up an SNS topic for drift notifications and subscribe all recipient emails.
+        Set up an SNS topic for drift notifications and subscribe the recipient email.
         
         Args:
             topic_name: Name of the SNS topic to create
@@ -194,16 +167,12 @@ class NotificationAgent:
             self.sns_topic_arn = topic_arn
             shared_memory.set("notification_sns_topic_arn", topic_arn)
             
-            # Subscribe all emails to topic
-            subscription_arns = []
-            for email in self.recipient_emails:
-                subscription_response = sns_client.subscribe(
-                    TopicArn=topic_arn,
-                    Protocol='email',
-                    Endpoint=email
-                )
-                subscription_arns.append(subscription_response.get('SubscriptionArn', 'pending confirmation'))
-                logger.info(f"Email subscription created for {email}: {subscription_response.get('SubscriptionArn', 'pending confirmation')}")
+            # Subscribe email to topic
+            subscription_response = sns_client.subscribe(
+                TopicArn=topic_arn,
+                Protocol='email',
+                Endpoint=self.recipient_email
+            )
             
             # Add topic tags
             sns_client.tag_resource(
@@ -221,13 +190,13 @@ class NotificationAgent:
             )
             
             logger.info(f"SNS topic created: {topic_arn}")
+            logger.info(f"Email subscription created: {subscription_response['SubscriptionArn']}")
             
             return {
                 "status": "success",
-                "message": f"SNS topic created and {len(self.recipient_emails)} emails subscribed",
+                "message": f"SNS topic created and email {self.recipient_email} subscribed",
                 "topic_arn": topic_arn,
-                "subscription_arns": subscription_arns,
-                "emails": self.recipient_emails
+                "subscription_arn": subscription_response.get('SubscriptionArn', 'pending confirmation')
             }
             
         except ClientError as e:
@@ -336,58 +305,18 @@ sns = boto3.client('sns')
 SNS_TOPIC_ARN = "{sns_topic_arn}"
 
 def is_drift_event(event_name):
-    return re.search(r'(Put|Delete|Modify|Create|Start|Stop|Run|Attach|Authorize|Terminate|Reboot|Describe)', event_name, re.IGNORECASE)
+    return re.search(r'(Put|Delete|Modify|Create|Start|Stop|Run|Attach|Authorize|Terminate)', event_name, re.IGNORECASE)
 
 IGNORED_SOURCES = [
     "logs.amazonaws.com",
     "cloudtrail.amazonaws.com"
 ]
 
-def get_resource_type(source, event_name, detail):
-    """Determine the resource type based on event details"""
-    if source == "ec2.amazonaws.com":
-        # Handle EC2 specific events
-        if "instance" in event_name.lower():
-            return "EC2 Instance"
-        elif "vpc" in event_name.lower():
-            return "VPC"
-        elif "subnet" in event_name.lower():
-            return "Subnet"
-        elif "security-group" in event_name.lower():
-            return "Security Group"
-        else:
-            return "EC2 Resource"
-    elif source == "s3.amazonaws.com":
-        return "S3 Bucket"
-    elif source == "iam.amazonaws.com":
-        return "IAM Resource"
-    elif source == "lambda.amazonaws.com":
-        return "Lambda Function"
-    elif source == "dynamodb.amazonaws.com":
-        return "DynamoDB Table"
-    else:
-        return "AWS Resource"
-
 def lambda_handler(event, context):
     detail = event.get("detail", {{}})
     event_name = detail.get("eventName", "unknown")
     source = detail.get("eventSource", "")
     user = detail.get("userIdentity", {{}}).get("arn", "unknown")
-    
-    # Extract resource information
-    resource_type = get_resource_type(source, event_name, detail)
-    
-    # Try to extract specific resource ID/name
-    resource_id = "Unknown"
-    if source == "ec2.amazonaws.com":
-        # Extract EC2 instance ID if available
-        request_params = detail.get("requestParameters", {{}})
-        if "instanceId" in request_params:
-            resource_id = request_params["instanceId"]
-        elif "instancesSet" in request_params:
-            instances = request_params.get("instancesSet", {{}}).get("items", [])
-            if instances:
-                resource_id = instances[0].get("instanceId", "Unknown")
     
     event_time_utc = detail.get("eventTime", datetime.utcnow().isoformat())
     try:
@@ -412,7 +341,7 @@ Hệ thống vừa ghi nhận một thay đổi cấu hình trong môi trường
 
 🔹 THÔNG TIN CHI TIẾT:: 
     - Sự kiện                   : {{event_name}}
-    - Tài nguyên liên quan      : {{resource_type}} ({{resource_id}})
+    - Tài nguyên liên quan      : IAM User
     - Thời gian ghi nhận        : {{formatted_time}}
     - Tài khoản thực hiện       : {{user}}
     - Nguồn                     : {{source}}
@@ -437,7 +366,7 @@ GeniDetect
 """
         sns.publish(
             TopicArn=SNS_TOPIC_ARN,
-            Subject=f"[CẢNH BÁO DRIFT] {{event_name}} - {{resource_type}}",
+            Subject=f"[CẢNH BÁO DRIFT] {{event_name}}",
             Message=message
         )
         return {{
@@ -563,35 +492,8 @@ GeniDetect
                         "prefix": "Modify"
                     }, {
                         "prefix": "Put"
-                    }, {
-                        "prefix": "Run"
-                    }, {
-                        "prefix": "Start"
-                    }, {
-                        "prefix": "Stop"
-                    }, {
-                        "prefix": "Terminate"
-                    }, {
-                        "prefix": "Reboot"
-                    }, {
-                        "prefix": "Attach"
-                    }, {
-                        "prefix": "Detach"
-                    }, {
-                        "prefix": "Allocate"
-                    }, {
-                        "prefix": "Associate"
-                    }, {
-                        "prefix": "Disassociate"
                     }]
                 }
-            }
-            
-            # Create a separate rule specifically for EC2 state changes
-            ec2_state_rule_name = f"{rule_name}-EC2StateChanges"
-            ec2_state_pattern = {
-                "source": ["aws.ec2"],
-                "detail-type": ["EC2 Instance State-change Notification"]
             }
             
             # Create the EventBridge rule
@@ -603,16 +505,6 @@ GeniDetect
             )
             
             rule_arn = rule_response['RuleArn']
-            
-            # Create EC2 state change rule
-            ec2_rule_response = events_client.put_rule(
-                Name=ec2_state_rule_name,
-                EventPattern=json.dumps(ec2_state_pattern),
-                State='ENABLED',
-                Description=f'Detect EC2 instance state changes for drift notification'
-            )
-            
-            ec2_rule_arn = ec2_rule_response['RuleArn']
             
             # Create Lambda function for processing events
             lambda_result = self._create_lambda_function()
@@ -693,31 +585,6 @@ GeniDetect
                 ]
             )
             
-            # Add permission for EventBridge to invoke the Lambda function for EC2 state changes
-            try:
-                lambda_client.add_permission(
-                    FunctionName='DriftDetectionFunction',
-                    StatementId=f'EventBridge-{ec2_state_rule_name}',
-                    Action='lambda:InvokeFunction',
-                    Principal='events.amazonaws.com',
-                    SourceArn=ec2_rule_arn
-                )
-            except ClientError as e:
-                # If the permission already exists, continue
-                if 'ResourceConflictException' not in str(e):
-                    raise e
-            
-            # Add Lambda as target for the EC2 state change rule
-            ec2_target_response = events_client.put_targets(
-                Rule=ec2_state_rule_name,
-                Targets=[
-                    {
-                        'Id': 'EC2StateDriftDetectionLambdaTarget',
-                        'Arn': lambda_function_arn
-                    }
-                ]
-            )
-            
             # Enable S3 to send events to EventBridge for all buckets
             s3_client = boto3.client('s3', region_name=self.aws_region)
             
@@ -747,8 +614,6 @@ GeniDetect
                 "rule_arn": rule_arn,
                 "s3_rule_name": s3_rule_name,
                 "s3_rule_arn": s3_rule_arn,
-                "ec2_rule_name": ec2_state_rule_name,
-                "ec2_rule_arn": ec2_rule_arn,
                 "lambda_function_arn": lambda_function_arn,
                 "resource_types": resource_types,
                 "creation_time": datetime.now().isoformat()
@@ -761,7 +626,6 @@ GeniDetect
                 "message": f"EventBridge rules and Lambda function created successfully",
                 "rule_arn": rule_arn,
                 "s3_rule_arn": s3_rule_arn,
-                "ec2_rule_arn": ec2_rule_arn,
                 "lambda_function_arn": lambda_function_arn,
                 "resource_types": resource_types
             }
@@ -890,54 +754,31 @@ GeniDetect
     
     def _send_test_notification(self, subject: str = "Test Drift Notification", message: str = "This is a test notification from the Drift Detection System.") -> Dict[str, Any]:
         """
-        Send a test notification to all subscribed emails.
+        Send a test notification to verify the notification system.
         
         Args:
-            subject: Subject line for the notification email
-            message: Message body for the notification email
+            subject: The subject line for the notification email
+            message: The message body for the notification email
             
         Returns:
             Dict with status and message
         """
         try:
-            # Check if SNS topic ARN is set
-            if not self.sns_topic_arn:
-                # Try to retrieve from shared memory
-                self.sns_topic_arn = shared_memory.get("notification_sns_topic_arn")
-                
-                # If still not available, set up the SNS topic
-                if not self.sns_topic_arn:
-                    sns_result = self._setup_sns_topic()
-                    if sns_result.get("status") != "success":
-                        return sns_result
-                    self.sns_topic_arn = sns_result.get("topic_arn")
-            
             # Create SNS client
             sns_client = boto3.client('sns', region_name=self.aws_region)
             
-            # Publish message to SNS topic
+            # Publish a test message to the SNS topic
             response = sns_client.publish(
                 TopicArn=self.sns_topic_arn,
                 Subject=subject,
                 Message=message
             )
             
-            # Update shared memory
-            shared_memory.set("last_notification_sent", {
-                "timestamp": datetime.now().isoformat(),
-                "subject": subject,
-                "message": message,
-                "message_id": response.get("MessageId"),
-                "recipient_emails": self.recipient_emails
-            })
-            
-            logger.info(f"Test notification sent: {response.get('MessageId')}")
+            logger.info(f"Test notification sent. Message ID: {response['MessageId']}")
             
             return {
                 "status": "success",
-                "message": f"Test notification sent to {len(self.recipient_emails)} email(s): {', '.join(self.recipient_emails)}",
-                "message_id": response.get("MessageId"),
-                "recipient_emails": self.recipient_emails
+                "message": "Test notification sent successfully."
             }
             
         except ClientError as e:
